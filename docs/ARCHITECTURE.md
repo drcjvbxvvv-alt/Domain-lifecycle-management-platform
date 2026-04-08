@@ -1,578 +1,775 @@
 # ARCHITECTURE.md — System Architecture Reference
 
-> This document is a detailed reference for the Domain Lifecycle Management Platform architecture.
-> Claude Code should read this when working on cross-cutting concerns, provider integrations, or deployment.
+> **Aligned with PRD + ADR-0003 (2026-04-09).** This document is the detailed
+> reference for the Domain Lifecycle & Deployment Platform. Read this when
+> working on cross-cutting concerns, agent protocol, artifact pipeline, or
+> deployment topology. CLAUDE.md is the higher-level entry point; this
+> document fills in the details.
 
 ---
 
 ## 1. System Overview
 
-The platform manages 12,000+ domains across 10 projects. It automates:
-- Domain onboarding (DNS + CDN + nginx conf + deployment + verification)
-- Continuous reachability monitoring from CN probe nodes (Phase 1: 3 nodes, one per ISP; Phase 2: 6 nodes, two per ISP with north/south coverage)
-- Automated failover when GFW blocks a domain — SLA: **detection < 2 min, failover < 5 min**
-- Batch releases with canary/rollback capabilities
-- Standby domain pool management with pre-warming
-
-### Core Principle: Prefix Determines Everything
+The platform is an enterprise-grade HTML + Nginx release operations system
+that manages 10+ projects and 1万+ domains. It builds **immutable artifacts**
+in the control plane, distributes them through **Pull Agents** (Go binaries
+on each Nginx server), verifies deployments with multi-tier probing, and
+maintains a complete audit trail.
 
 ```
-Given: main domain = example.com, prefix = "ws"
-System auto-derives:
-  FQDN:          ws.example.com
-  DNS Provider:   Cloudflare (from prefix rule)
-  CDN Provider:   Cloudflare (from prefix rule)
-  nginx template: ws.conf.tmpl (from prefix rule)
-  HTML template:  none (from prefix rule)
+┌─────────────────────────────────────────────────────────────────────┐
+│                       CONTROL PLANE                                  │
+│  ┌──────────────┐    ┌────────────┐    ┌──────────────────┐         │
+│  │ Vue 3 SPA    │◄──►│  REST API  │◄──►│  Auth / RBAC /   │         │
+│  │ (Naive UI)   │    │  (Gin)     │    │  Approval flow   │         │
+│  └──────────────┘    └─────┬──────┘    └──────────────────┘         │
+│                            │                                          │
+│  ┌─────────────────────────┴────────────────────────┐                │
+│  │ Project / Lifecycle / Template / Artifact /      │                │
+│  │ Release / Deploy / Agent / Probe / Alert         │                │
+│  │              (internal/* services)               │                │
+│  └─────────────────────────┬────────────────────────┘                │
+└────────────────────────────┼─────────────────────────────────────────┘
+                             │
+        ┌────────────────────┼─────────────────────────┐
+        ▼                    ▼                         ▼
+┌──────────────┐   ┌──────────────────┐   ┌────────────────────┐
+│ TASK & DATA  │   │  ARTIFACT STORE  │   │  EXECUTION PLANE   │
+├──────────────┤   ├──────────────────┤   ├────────────────────┤
+│ PostgreSQL   │   │  MinIO / S3      │   │  asynq workers     │
+│ + Timescale  │   │  (immutable)     │   │  (cmd/worker)      │
+│              │   │                  │   │                    │
+│ Redis        │   │  manifest.json   │   │  release executor  │
+│ (asynq + KV) │   │  + checksum      │   │  artifact builder  │
+│              │   │  + signature     │   │  probe dispatcher  │
+└──────────────┘   └────────┬─────────┘   │  notify dispatcher │
+                            │              └─────────┬──────────┘
+                            │ (download)             │
+                            ▼                        │ (dispatch)
+                  ┌──────────────────────────────────┴──┐
+                  │       PULL AGENTS (cmd/agent)        │
+                  │   ───────────────────────────────    │
+                  │   Go binary, mTLS, whitelist-only    │
+                  │                                       │
+                  │   register / heartbeat / pull /       │
+                  │   download / verify / write /         │
+                  │   nginx -t / reload / report          │
+                  │                                       │
+                  │   one per Nginx host (host_group N)   │
+                  └───────────────────────────────────────┘
 ```
 
-Prefix rules have two levels: system-wide defaults + project-level overrides.
-Project-level ALWAYS wins.
+The platform automates the full release lifecycle:
+
+```
+Domain Request → Approval → DNS Provision → Domain Active
+     ↓
+Template Author → Template Version Publish
+     ↓
+Release Create → Artifact Build → Sign → Plan Shards → Dispatch
+     ↓
+Agent Pull → Verify → Write → nginx -t → Reload → Report
+     ↓
+Probe Verify (L1 + L2 + L3) → Continue / Pause / Rollback → Audit
+```
 
 ---
 
 ## 2. Subsystem Responsibilities
 
-### 2.1 Domain Registry & Configuration (internal/domain, internal/project)
+### 2.1 Project Management (`internal/project`)
 
-- CRUD for projects, main domains, subdomains, prefix rules
-- Automatic subdomain generation from prefix rules when a domain is registered
-- Domain state machine enforcement (see CLAUDE.md)
-- Audit trail for all state transitions
+- CRUD for `projects` table
+- Project membership (Phase 4)
+- Project-level settings (default approver, notify channel, default
+  release policy)
+- Soft delete; hard delete only after all releases archived
 
-**Rule — `main_domains.status` single write path (ADR-0002 D2):**
-All status mutations MUST go through
-`internal/domain.Service.Transition(ctx, id, from, to, reason, triggeredBy)`.
+### 2.2 Domain Lifecycle (`internal/lifecycle`)
+
+The Domain Lifecycle module manages domain identity and provisioning. It is
+**prerequisite to** the deployment system — only `active` domains can be the
+target of a release.
+
+State machine (CLAUDE.md §"Domain Lifecycle State Machine"):
+
+```
+requested → approved → provisioned → active → disabled → active
+                                       │              │
+                                       ▼              ▼
+                                    retired        retired
+```
+
+**Single write path (ADR-0003 D9, methodology from ADR-0002 D2):**
+
+All `domains.lifecycle_state` mutations go through
+`internal/lifecycle.Service.Transition(ctx, id, from, to, reason, triggeredBy)`.
 This method runs entirely inside one Postgres transaction:
 
-1. `SELECT status FROM main_domains WHERE id = $1 FOR UPDATE`
-2. Assert `current == from` → otherwise `ErrStatusRaceCondition`
-3. Assert `CanTransition(from, to)` → otherwise `ErrInvalidTransition`
-4. `UPDATE main_domains SET status, updated_at = NOW()`
-5. `INSERT domain_state_history (from_status, to_status, reason, triggered_by)`
+1. `SELECT lifecycle_state FROM domains WHERE id = $1 FOR UPDATE`
+2. Assert `current == from` → otherwise `ErrLifecycleRaceCondition`
+3. Assert `CanTransition(from, to)` → otherwise `ErrInvalidLifecycleState`
+4. `UPDATE domains SET lifecycle_state, updated_at = NOW()`
+5. `INSERT domain_lifecycle_history (from_state, to_state, reason, triggered_by)`
 6. `COMMIT`
 
-No other package (`internal/release`, `internal/switcher`, `internal/pool`,
-`internal/domain/deployer.go`, probe-triggered handlers) may write a status
-change by any other means. This is mechanically enforced at review time via
-`grep -r 'UPDATE main_domains SET status' --include='*.go'`, which must
-return exactly one hit inside `store/postgres/domain.go::updateStatusTx`.
+No other package may write `domains.lifecycle_state` directly. Enforced by
+`make check-lifecycle-writes` CI grep gate.
 
-**Rule — `prefix_rules` are soft-frozen after use (ADR-0002 D3):**
-Once any `subdomains` row references a `prefix_rules` row, the rule's
-runtime-affecting fields (`dns_provider`, `cdn_provider`, `nginx_template`,
-`html_template`) cannot be edited in isolation. An `UPDATE prefix_rules`
-request that changes any of these fields MUST be accompanied by a rebuild
-release (`releases.kind = 'rebuild'`) that re-renders and redeploys all
-affected subdomains through the standard canary pipeline. The service layer
-rejects edit-only requests with HTTP 409 `prefix_rule_drift_requires_rebuild`.
+**Provisioning flow (`approved → provisioned`)**: an asynq task
+`lifecycle:provision` picks up the row, calls the configured DNS provider
+(`pkg/provider/dns`) to create A/CNAME records, on success transitions to
+`provisioned`. Failures retry with exponential backoff (1min, 5min, 15min,
+then operator intervention required).
 
-The rebuild release:
-1. Creates a `releases` row with `kind='rebuild'`, populated with the set of
-   affected subdomains
-2. Updates `subdomains` rows AND the `prefix_rules` row inside the same
-   transaction — reads see the new values immediately
-3. Dispatches domain tasks (render → svn → reload → verify) through the
-   normal release pipeline, honouring canary + shard semantics
-4. On canary failure, operator chooses rollback (restore old values from
-   `conf_snapshots`) or roll forward (fix and retry)
+**Approval (`requested → approved`)**: in Phase 1, an "auto-approve" code path
+exists for development. Phase 4 wires this to the approval module
+(`internal/approval`) which requires a Release Manager or Admin to grant.
 
-See `DEVELOPMENT_PLAYBOOK.md §7` for the exact implementation sequence.
+### 2.3 Template Management (`internal/template`)
 
-### 2.2 DNS/CDN Automation (pkg/provider)
+Templates define the structure of HTML and nginx files for a project. Each
+template has many `template_versions`; **versions are immutable once published**.
 
-- Unified interface abstracting 5 CDN + 4 DNS vendors
-- Provider registry with runtime lookup by name
-- All provider operations are async (dispatched as asynq tasks)
-- Retry with exponential backoff per provider
-- Provider-specific quirks handled INSIDE the implementation, NEVER leaked to business logic
+```
+templates (1) ──────── (N) template_versions
+                              │
+                              ├── content_html (Go text/template source)
+                              ├── content_nginx (Go text/template source)
+                              ├── default_variables (JSONB)
+                              ├── published_at (NULL = draft)
+                              └── checksum
+```
 
-**Rule — DNS record TTL:** All CNAME / A records created by the platform default to
-**TTL = 60s**. This is a hard requirement for the auto-switch SLA in §2.5; providers that
-do not support 60s TTL (e.g. some free-tier plans) must be flagged in their adapter and
-rejected at provider registration time.
+Releases pin to a specific `template_version_id`, never to a `template_id`.
+Editing a "live" template means publishing a new version and creating a new
+release; old releases continue to reference the old version forever.
 
-**Rule — CDN `CloneConfig` MUST be idempotent (ADR-0002 D4):** Every
-`cdn.Provider.CloneConfig(ctx, src, dst)` implementation must converge to
-the same final state whether called once or N times with the same arguments:
+**Variables**: each domain has its own `domain_variables` JSONB blob. At
+artifact build time, the template is rendered against
+`merge(template.default_variables, domain.variables)`.
 
-- If `dst` does not exist on the vendor side: create + copy + return
-- If `dst` exists with identical config: return nil (success, no-op)
-- If `dst` exists with different config: overwrite or delete-then-recreate
-- Partial-failure states (destination created but cert not attached, origin
-  not yet set, etc.) MUST be self-healing on retry
+### 2.4 Artifact Build Pipeline (`internal/artifact`)
 
-Providers that cannot detect "destination exists with what config" via their
-API MUST emulate it with `GetDomainStatus + ListRules` before `CloneConfig`.
-Providers that cannot meet this requirement at all MUST declare themselves
-non-idempotent at registration time; the registry will reject them for use
-in the auto-switch path. Every CDN provider implementation requires a unit
-test `TestCloneConfig_Idempotent` that calls `CloneConfig` twice against a
-mock server and asserts identical final state.
+An artifact is **the immutable product of rendering a template version against
+a set of domains**. PRD §8.1 defines the structure:
 
-**Why idempotency is non-optional**: asynq retries `switch:execute` up to 3
-times. A half-succeeded `CloneConfig` that cannot be completed on retry
-burns all 3 attempts, escalates to P0, and leaves the destination CDN in a
-state only manual vendor-console cleanup can fix — during an incident.
+```
+artifacts/
+  {project_slug}/
+    {release_id}/
+      manifest.json       # see below
+      checksums.txt       # SHA-256 of every file
+      signature           # cosign / GPG / HMAC, depending on ADR-0004
+      domains/
+        {fqdn}/
+          index.html
+          assets/...
+      nginx/
+        {host_group}/
+          {fqdn}.conf
+```
 
-**Provider implementation priority:**
-- P0: Cloudflare (DNS+CDN), Alibaba Cloud (DNS+CDN)
-- P1: Tencent Cloud (DNS+CDN), GoDaddy (DNS)
-- P2: Huawei Cloud (DNS+CDN), Self-hosted CDN
+**`manifest.json` schema** (see `pkg/agentprotocol/manifest.go`):
 
-**asynq queue layout (ADR-0002 D5, canonical):**
+```json
+{
+  "artifact_id": "art_01HXYZ...",
+  "release_id":  "rel_01HXYZ...",
+  "project":     "project-a",
+  "release_type": "html|nginx|full",
+  "template_version_id": "tv_01HXYZ...",
+  "template_version":    "v23",
+  "created_at":   "2026-04-09T10:00:00Z",
+  "created_by":   "user_01HXYZ...",
+  "source": {
+    "template_checksum": "sha256:...",
+    "variables_hash":    "sha256:..."
+  },
+  "domains": [
+    {
+      "fqdn": "a.example.com",
+      "files": [
+        { "path": "domains/a.example.com/index.html", "size": 1234, "sha256": "..." }
+      ]
+    }
+  ],
+  "nginx": [
+    {
+      "host_group": "host-group-01",
+      "files": [
+        { "path": "nginx/host-group-01/a.example.com.conf", "size": 567, "sha256": "..." }
+      ]
+    }
+  ],
+  "checksum": "sha256:...",
+  "signature": "..."
+}
+```
 
-| Queue | Tasks | Priority weight | Concurrency |
-|-------|-------|-----------------|-------------|
-| `critical` | `switch:execute`, `probe:verify` | 10 | 20 |
-| `dns` | `dns:*` | 6 | 10 |
-| `cdn` | `cdn:*` | 6 | 10 |
-| `deploy` | `svn:*`, `agent:*`, `nginx:*` | 4 | 5 (serial per server) |
-| `default` | `template:*`, `pool:*` | 2 | 10 |
+**Build steps**:
 
-`strict: false` — weighted priority, not strict priority. Strict priority
-would starve pool warmup under sustained DNS load. The `critical` queue
-exists specifically so auto-switch can preempt routine DNS work even when
-DNS API quota is saturated; this is load-bearing for the auto-switch SLA.
+1. **Plan**: enumerate domains in scope × template version; compute output paths.
+2. **Render**: for each domain, render `template.content_html` and
+   `template.content_nginx` against the merged variables. Each renderer is a
+   pure function: same input → same bytes.
+3. **Hash**: SHA-256 every output file. Aggregate into `checksums.txt`.
+4. **Manifest**: write `manifest.json` with the file list + per-file hashes.
+5. **Compute artifact checksum**: `sha256(manifest.json || checksums.txt)`.
+6. **Sign**: append signature per ADR-0004 scheme.
+7. **Upload**: `pkg/storage` writes the entire tree to
+   `s3://{bucket}/{project}/{release_id}/`.
+8. **Mark `artifacts.signed_at = NOW()`** — after this point the row is immutable.
 
-Every task payload struct MUST include `DomainTaskID int64` for progress
-tracking to DB. `cmd/worker/main.go::asynq.Config.Queues` is the only
-place this layout is configured in code.
+**Idempotency contract**: an artifact build with the same `(template_version_id,
+domain_set, variables_hash)` MUST produce byte-identical output. This means:
 
-### 2.3 Release Subsystem (internal/release)
+- No timestamps in rendered content (use the `created_at` in the manifest, not in HTML)
+- No random seeds
+- Variable iteration order is sorted
+- File ordering in `checksums.txt` is sorted
 
-Hierarchy:
+Violations are caught by a reproducibility test in `internal/artifact/build_test.go`
+that runs the same build twice and asserts byte equality.
+
+### 2.5 Release Subsystem (`internal/release`)
+
+A Release is one orchestrated rollout of one artifact across a defined scope.
+
+**Hierarchy** (PRD §12):
+
 ```
 Release
-  └── Shard (200-500 domains per shard)
-       └── DomainTask (one per domain: render → deploy → verify)
-            └── ServerTask (one per target machine: svn up → nginx reload)
+  └── Release Scope (which domains, which host_groups, which release_type)
+       └── Release Shard (200-500 domains per shard, sized for canary first)
+            └── Domain Task (one per domain × per host)
+                 └── Agent Task (the actual instruction sent to one agent)
 ```
 
-**Shard partitioning rules:**
-- A Release is always scoped to **one project** (never cross-project). Large cross-project
-  operations must be dispatched as multiple independent Releases.
-- Within a project, domains are partitioned by `hash(main_domain_id) % shard_count` so that
-  retries of the same domain always land in the same shard.
-- Shard size: normal shards 200–500 domains. The **first (canary) shard** is always the
-  smaller of `30 domains` or `2% of the release`, with a hard minimum of 10. Rationale:
-  a blast radius of ≤ 30 domains is small enough that a template regression caught at
-  canary costs at most one manual rollback cycle, while still being statistically
-  meaningful for the 95% probe-verification threshold.
+**State machine** (CLAUDE.md §"Release State Machine"):
 
-**Canary strategy:**
-- Deploy canary shard → wait for probe verification → success rate ≥ 95% → continue
+```
+pending → planning → ready → executing → succeeded
+                                │
+                                ├→ paused → executing
+                                │
+                                └→ failed → rolling_back → rolled_back
+```
+
+**Single write path**: all `releases.status` mutations go through
+`internal/release.Service.TransitionRelease()`. Same pattern as Domain
+Lifecycle. CI gate: `make check-release-writes`.
+
+**Shard sizing** (PRD §12):
+
+- Normal shards: 200–500 domains
+- **Canary shard (shard 0)**: smaller of `min(30, 5%)` of total domains, hard
+  minimum 10. Rationale: blast radius small enough that a rendering bug or
+  bad nginx conf caught at canary costs at most one fast rollback.
+- Shards within a release are partitioned by `hash(domain_id) % shard_count`
+  so that retries of the same domain land in the same shard.
+- A Release is always scoped to **one project**.
+
+**Canary policy** (PRD §13):
+
+- Deploy canary shard → wait for L2 probe verification → success rate ≥ 95% → continue
 - Success rate < 95% → auto-pause Release, alert operators
-- Any shard can be paused/resumed/rolled back independently
+- Per-host failure: `> N consecutive failures on the same host` → mark host
+  in error and skip it for the rest of the release
+- Operator can pause / resume / rollback any shard independently
 
-**nginx reload aggregation:**
-- Same server, multiple conf changes → buffer 30 seconds OR 50 domains, then single reload
-- Emergency (P1 alert failover) → skip buffer, immediate reload
-- ALWAYS run `nginx -t` before reload.
+**Rollback** (PRD §14):
 
-**Reload failure handling (explicit):**
-- `nginx -t` fails on a server → roll back *only that server's* batch (restore previous
-  conf files from snapshot, no reload issued), mark every DomainTask in that server's batch
-  as `failed` with reason `nginx_test_failed`.
-- The enclosing Release shard is **not** globally aborted; other servers in the same shard
-  continue independently. However, if > 20% of servers in a shard fail `nginx -t`, the
-  whole shard is paused and escalated to P1 alert.
-- DomainTasks marked `failed` do **not** auto-retry via asynq. They return to `deploying`
-  only via an explicit operator re-queue, because a template error will just fail again.
-- Every reload batch MUST snapshot the full previous conf to DB before writing new conf,
-  per CLAUDE.md Critical Rule #6.
+- Rollback re-deploys the **previous successful artifact** for the same scope
+- Rollback runs through the same shard pipeline (no special path)
+- Rollback also undergoes probe verification
+- Per-domain / per-shard / per-release granularity supported
+- Rollback decisions are recorded in `rollback_records` with operator + reason
 
-### 2.4 Probe Monitoring (internal/probe, cmd/scanner)
+**4-layer concurrency limits** (PRD §12):
 
-**Three-tier probing:**
+| Layer | Limit | Where enforced |
+|---|---|---|
+| Release | `max_concurrent_releases_per_project` (default 2) | `release.Service.Create()` checks count |
+| Project | `max_concurrent_shards_per_project` (default 5) | shard dispatcher consults Redis counter |
+| Host | `max_concurrent_tasks_per_host` (default 1; `nginx -t` is serial) | `agent.Service.Dispatch()` per-agent counter |
+| Domain | `domain_task_lock:{domain_id}` Redis lock | `release:dispatch_shard` task acquires |
 
-| Tier | Target | Checks | Frequency | Concurrency |
-|------|--------|--------|-----------|-------------|
-| L1 | All 12K main domains | DNS + TCP :443 | Every 60s | 500 goroutines |
-| L2 | L1-passed domains, sample 1-2 subdomains | HTTP 200 + latency | Every 5min | 200 goroutines |
-| L3 | Manually tagged core domains | HTTP + keyword + TLS handshake + cert expiry | Every 30s | 50 goroutines |
+### 2.6 Agent Management (`internal/agent`)
 
-**Detection & SLA math (L1):**
-- Cycle = 60s. Two trigger paths:
-  - **Fast path**: a single cycle in which *all* active probe nodes report the same
-    non-ok status (dns_poison / tcp_block / http_hijack) → immediate P1.
-  - **Confirmation path**: majority of active nodes (Phase 1: ≥ 2 of 3; Phase 2: ≥ 4 of 6)
-    report non-ok for **2 consecutive cycles** → P1.
-- Worst-case detection latency via fast path ≈ 60s + ~5s aggregation ≈ **65s**.
-- Worst-case via confirmation path ≈ 60s + 60s + ~5s ≈ **125s** (edge of SLA, acceptable
-  because this path exists only to suppress transient single-node blips).
-- Single-node, single-cycle failures become a P3 log, never a P1.
-- `alert:dedup` (see Redis keys) ensures the same status does not re-alert within 1h.
-- **Capacity note**: 12K domains × 3 probe nodes ÷ 60s cycle ≈ 200 checks/s/node. On the
-  1C/1G Phase-1 probe boxes this is achievable only with Go scanner concurrency ≥ 500
-  and DNS/TCP timeouts ≤ 3s. If live load testing shows CPU > 80% sustained, fall back
-  to L1 = 90s and negotiate the SLA to < 3 min with stakeholders before Phase 1 cutover.
+The Agent subsystem on the **control plane side** is responsible for:
 
-**Block detection logic:**
-```
-DNS poisoning:   Resolved IPs match known GFW poison IPs (127.0.0.1, 243.185.187.39, etc.)
-TCP block:       connect() to :443 times out after 3s
-SNI block:       TCP connects but TLS handshake fails
-HTTP hijack:     Response contains block keywords OR unexpected redirect
-Content tamper:  Response body checksum mismatch
-```
+- **Registration**: accept `POST /agent/v1/register`, issue or accept
+  certificate, write `agents` row, transition state to `registered → online`
+- **Heartbeat tracking**: process `POST /agent/v1/heartbeat`, update
+  `agent_heartbeats` and `agents.last_seen_at`, detect drift
+- **Task dispatch**: when a release shard needs work done on host group X,
+  enqueue `agent_tasks` rows targeted at the agents in that group
+- **Pull endpoint**: serve `GET /agent/v1/tasks` — returns the next pending
+  task for the calling agent (long-poll with timeout)
+- **State machine**: `internal/agent.Service.TransitionAgent()` is the only
+  write path for `agents.status`. CI gate: `make check-agent-writes`
+- **Drain / disable / quarantine**: operator actions that change agent state
+- **Self-upgrade dispatch**: `agent_upgrade_jobs` rows describe desired
+  agent versions; canary upgrade picks N agents, monitors, expands
 
-**Data flow:**
-```
-CN Probe Nodes (Go Scanner)
-    │
-    │ HTTPS POST /api/v1/probe/push (mTLS authenticated)
-    ▼
-Probe Receiver (境外)
-    │
-    ├──→ TimescaleDB (raw results, 90-day retention)
-    ├──→ Redis (current state per domain, dedup)
-    └──→ Alert Engine (on state change only)
-```
+**State machine** (CLAUDE.md §"Agent State Machine"): the lifecycle includes
+`registered → online ↔ offline / busy / idle / draining / disabled / upgrading
+/ error`.
 
-### 2.5 Alert & Auto-Disposition (internal/alert, internal/switcher)
+**Offline detection**: `TypeAgentHealthCheck` runs every 30s on the `critical`
+queue. For each `online` agent whose `last_seen_at < NOW() - 90s`, transition
+to `offline`. After `offline > 5min`, escalate to `error` and alert.
 
-**Alert severity:**
+**Pull agent (the binary, on each Nginx host)** is described in §3.4 below.
+
+### 2.7 Probe Subsystem (`internal/probe`) — Deployment Verification
+
+> **Important**: probing in this platform is for **deployment verification**,
+> not GFW detection. The L1/L2/L3 tiers below verify "did my release actually
+> take effect", not "is this domain reachable from China". The previous
+> CN-node probe network and GFW detection logic are out of scope per
+> ADR-0003 D8 / D11.
+
+**Three tiers** (PRD §15):
+
+| Tier | Target | Checks | When |
+|---|---|---|---|
+| **L1** | All `active` domains | DNS resolves, TCP :443, HTTP status, response time | Every 5 min |
+| **L2** | Domains in current/recent release | Expected `<meta name="release-version" content="...">`, expected title/keyword, content checksum | After every release shard succeeds, plus every 15 min for the most recent release |
+| **L3** | Domains tagged `core` | Business endpoint health, specific API/resource availability | Every 1 min |
+
+**L2 verification details**: every artifact build embeds the artifact ID into
+the rendered HTML as `<meta name="release-version" content="{artifact_id}">`.
+The probe fetches the page, parses the meta tag, and confirms the value matches
+the artifact that *should* be deployed. This is the only way to be confident
+the release actually landed (HTTP 200 alone is not enough — could be cached,
+could be the previous version, could be a misconfigured fallback).
+
+**Probe orchestration**: `cmd/worker` runs probe dispatchers that pull pending
+checks from `probe_tasks` and execute HTTP / TLS / DNS calls. Results write to
+the TimescaleDB `probe_results` hypertable (90-day retention). On state
+changes (pass → fail or fail → pass), the alert engine is notified.
+
+**Where probes run**:
+
+- L1 / L2 / L3 from one or more "probe runner" hosts in the platform's own
+  network (not from agents — agents only deploy)
+- Phase 1 ships with one probe runner colocated with `cmd/worker`
+- Phase 2+ may add geographically distributed probe runners
+
+### 2.8 Alert & Notification (`internal/alert`)
+
+**Severity** (PRD §16):
 
 | Level | Trigger | Auto-action |
-|-------|---------|-------------|
-| P0 | Standby pool exhausted / entire project unreachable | Pause all releases |
-| P1 | Main domain blocked (DNS poison / TCP block / HTTP hijack) | Trigger auto-switch |
-| P2 | Partial subdomain anomaly / pool < 5 remaining | Alert for manual intervention |
-| P3 | High latency / non-critical anomaly | Log only |
-| INFO | Domain recovered / switch completed | Notification |
+|---|---|---|
+| **P1** | Core domain unavailable / nginx reload failed on > 20% of shard / release auto-paused | Page operators (Telegram + Webhook), pause releases |
+| **P2** | Single-host failure / probe degraded / agent went offline | Notify (Telegram channel) |
+| **P3** | Latency anomaly / non-critical L3 fail | Log only, daily digest |
+| **INFO** | Release succeeded / agent recovered / rollback complete | Notify channel |
 
-**Auto-switch flow (P1 trigger):**
-```
-0. Acquire switch lock (ADR-0002 D1):
-   a. Redis fast path:   SET switch:lock:{main_domain_id} <worker_id> NX PX 600000
-      If SETNX fails → another worker already switching → return immediately.
-      If Redis unreachable → log warning, continue to step (b).
-   b. Postgres row lock (authoritative):
-      BEGIN;
-      SELECT id, status FROM main_domains WHERE id = $1 FOR UPDATE;
-      Validate CanTransition(current_status, 'switching').
-      If Postgres unreachable → ABORT the switch (no fallback; PG is ground truth).
-   Release order on success: DEL the Redis key, then COMMIT the PG tx.
-   If the process crashes between DEL and COMMIT, the Redis TTL cleans up the orphan.
+**Alert deduplication** (CLAUDE.md Critical Rule #8):
 
-1. Send alert (Telegram + Webhook)
-2. Pause all pending releases for this domain's project
-3. Select highest-priority ready domain from pool (pool.status = 'ready')
-4. DNS migration: delete old CNAMEs, create new CNAMEs
-5. CDN migration: clone config from old domain to new domain
-   (CloneConfig is idempotent per §2.2 rule; safe to asynq-retry)
-6. Re-render nginx conf with new main domain (prefixes unchanged)
-7. SVN commit + Agent deploy
-8. Wait 30-60s for DNS TTL + CDN propagation (this assumes all managed CNAME TTLs are 60s — see §2.2 rule)
-9. Probe verification from ≥ majority of active CN probe nodes (Phase 1: ≥ 2 of 3; Phase 2: ≥ 4 of 6)
-10. State transitions (all via domain.Service.Transition(), per §2.1 rule):
-    - old main_domain: 'switching' → 'blocked' (reason='gfw_blocked', triggeredBy='switcher')
-    - new main_domain: created in 'deploying' at step 4, → 'active' here
-    - pool row for new domain: 'ready' → 'promoted' via pool.Service.OnSwitchCommitted()
-```
+- Same `(target, alert_type, severity)` → 1 alert per hour max
+- Multi-target alerts batch into one message ("3 domains in project A failed
+  L2 probe: a.example.com, b.example.com, c.example.com")
+- `alert_dedup:{type}:{target}` Redis key with TTL = dedup window
 
-Each step has rollback logic. If step N fails, steps 1..N-1 are reversed.
-The switch lock is held for the entire cycle; the hard ceiling is the
-Redis key TTL (600s = 10min), which also bounds the maximum duration a
-`SELECT ... FOR UPDATE` row lock can be held.
+**Notification channels** (`pkg/notify`):
 
-### 2.6 Standby Pool (internal/pool)
+- Telegram bot (P1, configured via `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID`)
+- Generic HTTP webhook (P1)
+- Slack / Teams (P2+)
 
-**Lifecycle:**
-```
-pending ──→ warming ──→ ready ──→ promoted
-   ▲           │          │          │
-   │           ▼          ▼          ▼
-   └─────── pending                blocked
-          (retry w/                   │
-        backoff)            ┌─────────┴─────────┐
-                            ▼                   ▼
-                        retired              pending
-                       (terminal)         (operator un-block,
-                                           re-enter warming)
-```
+### 2.9 Approval Flow (`internal/approval`) — Phase 4
 
-> Naming is deliberately distinct from the main-domain state machine in CLAUDE.md so that
-> `pool.status = ready` is never confused with `main_domain.status = active`, and
-> `pool.status = promoted` clearly marks the moment a pooled domain was swapped in to
-> replace a blocked main domain.
+Production releases and nginx releases require an approval. The approval flow
+adds:
 
-**Pre-warming (transition `pending → warming → ready`):**
-1. `pending → warming` when the warmup worker picks up the row
-2. Create DNS CNAME records for all prefixes (TTL = 60)
-3. Create CDN configurations for all prefixes
-4. Wait for DNS + CDN propagation
-5. Verify reachability from ≥ majority of active CN probe nodes (Phase 1: ≥ 2 of 3; Phase 2: ≥ 4 of 6)
-6. ALL required checks pass → status = `ready`. ANY fail → status = `pending`, `warmup_attempts++`, `warmup_last_error = <reason>`, exponential-backoff retry (1min, 5min, 15min). After the third failure, auto-retry stops and operator re-queue is required.
+- `approval_requests` table: `(release_id, requested_by, requested_at,
+  required_role, status)` where `status IN ('pending', 'granted', 'denied')`
+- A reviewer with role `release_manager` or `admin` can grant or deny
+- A release in `ready` state with `approval_required = true` cannot transition
+  to `executing` until a `granted` approval row exists
+- Grant / deny is audited
 
-**Promotion (`ready → promoted`):**
-- Invoked by `internal/switcher` on successful switch completion
-- Calls `pool.Service.OnSwitchCommitted(poolRowID)` atomically with the
-  `domain.Service.Transition(newMainDomain, 'deploying' → 'active')` write
+In Phase 1, the schema is in place but an `auto_approve` mechanism is wired
+so dev work can proceed without a separate approver.
 
-**Post-promotion lifecycle (ADR-0002 D6):**
+### 2.10 Audit (`internal/audit`)
 
-After promotion, the pool row mirrors the state of its corresponding
-`main_domains` row:
-
-- `promoted → blocked`: the switcher detects that the promoted domain is
-  itself now blocked. Invoked via `pool.Service.OnMainDomainBlocked(poolRowID)`
-  from the P1 trigger handler, atomically with the main_domain Transition
-  into `'blocked'`.
-- `blocked → retired`: terminal. Operator decision via
-  `pool.Service.Retire(poolRowID, reason)`. The `(project_id, domain)`
-  string is effectively burned — `uq_pool_domain` prevents re-insertion.
-- `blocked → pending`: operator un-block via `pool.Service.Unblock(poolRowID)`.
-  Resets `warmup_attempts = 0`, clears `warmup_last_error`, and the row
-  re-enters the normal `pending → warming → ready` flow. Used when the
-  block was transient (DNS provider outage, temporary upstream issue) and
-  operators want to reuse the domain.
-
-**Invariant**: For every `pool.status = 'promoted'` row, there is exactly
-one `main_domains` row with `main_domains.domain = pool.domain` and
-`main_domains.status NOT IN ('retired')`. The switcher is responsible for
-maintaining this invariant on every promote/block/retire operation.
-
-**Pool thresholds (counted over `status = ready` only):**
-- Normal projects: alert at < 2 remaining
-- Core projects: alert at < 5 remaining
-- Any project's `ready` pool = 0: P0 alert (critical)
-
----
-
-## 3. Data Architecture
-
-### PostgreSQL Tables
-
-All tables follow these conventions:
-- `id BIGSERIAL PRIMARY KEY` — internal use only, never exposed in API
-- `uuid UUID NOT NULL DEFAULT gen_random_uuid()` — external identifier
-- `created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()`
-- `updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()`
-- `deleted_at TIMESTAMPTZ` — soft delete
-
-Key relationships:
-```
-projects 1──N main_domains
-main_domains 1──N subdomains
-main_domains 1──N domain_state_history
-projects 1──N main_domain_pool
-projects 1──N releases
-releases 1──N release_shards
-release_shards 1──N domain_tasks
-main_domains 1──N switch_history
-```
-
-### TimescaleDB (probe_results hypertable)
+Every state transition, every operator action, every release decision writes
+an `audit_logs` row:
 
 ```sql
-CREATE TABLE probe_results (
-    probe_node      VARCHAR(32)  NOT NULL,
-    isp             VARCHAR(16)  NOT NULL,
-    domain          VARCHAR(253) NOT NULL,
-    tier            SMALLINT     NOT NULL,      -- 1=L1, 2=L2, 3=L3
-    status          VARCHAR(16)  NOT NULL,      -- ok / dns_poison / tcp_block / sni_block / http_hijack / content_tamper / timeout
-    block_reason    VARCHAR(64),                -- free-form detail, NULL when ok
-    dns_ok          BOOLEAN      NOT NULL,
-    dns_ips         TEXT[],
-    tcp_latency_ms  FLOAT,
-    tls_handshake_ok BOOLEAN,                   -- L2+ only
-    tls_sni_ok      BOOLEAN,                    -- L2+ only
-    tls_cert_expiry TIMESTAMPTZ,                -- L3 only
-    http_code       SMALLINT,
-    http_hijacked   BOOLEAN,
-    content_hash    BYTEA,                      -- L3 only, for content_tamper detection
-    checked_at      TIMESTAMPTZ  NOT NULL
-);
-
-SELECT create_hypertable('probe_results', 'checked_at');
-
--- Retention policy: 90 days raw, aggregated summaries permanent
-SELECT add_retention_policy('probe_results', INTERVAL '90 days');
-
--- Continuous aggregate for dashboard
-CREATE MATERIALIZED VIEW probe_hourly
-WITH (timescaledb.continuous) AS
-SELECT
-    time_bucket('1 hour', checked_at) AS bucket,
-    domain,
-    probe_node,
-    COUNT(*) AS total_checks,
-    COUNT(*) FILTER (WHERE status = 'ok') AS ok_count,
-    AVG(tcp_latency_ms) AS avg_latency
-FROM probe_results
-GROUP BY bucket, domain, probe_node;
+audit_logs (
+    id          BIGSERIAL,
+    user_id     BIGINT,           -- nullable for system actions
+    action      VARCHAR(64),      -- e.g. 'release.created', 'domain.transition.requested→approved'
+    target_kind VARCHAR(32),      -- 'release', 'domain', 'agent', etc.
+    target_id   VARCHAR(64),      -- UUID of target
+    detail      JSONB,
+    created_at  TIMESTAMPTZ
+)
 ```
 
-### Redis Key Design
+State machine `Transition()` calls write history rows to per-object tables
+(`domain_lifecycle_history`, `release_state_history`, `agent_state_history`)
+in addition to the global `audit_logs`.
+
+---
+
+## 3. Pull Agent Detailed Design
+
+The Pull Agent is the most security-sensitive component of the platform —
+it runs as root (or with sudo for nginx reload) on every Nginx host. Its
+design is structurally constrained to minimize blast radius (PRD §3-§7,
+§20-§21).
+
+### 3.1 Binary characteristics
+
+- Single Go static binary (`cmd/agent`), cross-compiled for `linux/amd64`
+- Built by `make agent` → `bin/agent-linux-amd64`
+- Deployed via systemd (unit file in `deploy/systemd/agent.service`)
+- Configuration via `/etc/domain-platform/agent.yaml` + environment
+- Resource footprint: target < 20 MB RAM idle, < 5% CPU heartbeat
+
+### 3.2 Allowed actions (whitelist)
+
+Per CLAUDE.md Critical Rule #3, the agent binary contains code paths for
+**only** these actions:
+
+1. **Register**: `POST /agent/v1/register` with hostname, IP, region,
+   datacenter, host_group (from config), agent version, capabilities
+2. **Heartbeat**: `POST /agent/v1/heartbeat` every 15s with current state,
+   current task ID, last error
+3. **Pull tasks**: long-poll `GET /agent/v1/tasks` (60s timeout)
+4. **Claim task**: `POST /agent/v1/tasks/{id}/claim`
+5. **Download artifact**: HTTP GET against signed S3 URL (URL is in the task)
+6. **Verify checksum**: SHA-256 of every file vs `manifest.json`
+7. **Verify signature**: per ADR-0004 scheme
+8. **Write to staging**: copy files into `{deploy_path}/.staging/{release_id}/`
+9. **Run `nginx -t`** against staging conf path (only if task is type `nginx` or `full`)
+10. **Snapshot previous**: copy current files to `{deploy_path}/.previous/{release_id}/` (Critical Rule #6)
+11. **Atomic swap**: rename staging → real path
+12. **Reload nginx**: `nginx -s reload` (only if task allows + previous step succeeded)
+13. **Local verification**: HTTP HEAD against `localhost:80/{configured_path}` returning expected code
+14. **Report**: `POST /agent/v1/tasks/{id}/report` with status, duration, error message
+15. **Upload logs**: `POST /agent/v1/logs` with the structured log buffer
+
+### 3.3 Forbidden actions (NOT in the binary)
+
+The binary contains **no** code paths for:
+
+- `os/exec.Command(...)` outside of the four allowed shell-out points
+  (`nginx -t`, `nginx -s reload`, the configured local-verify HTTP curl, and
+   the systemd self-restart on upgrade) — each call site is reviewed and
+  hard-coded, never user-input-derived
+- Pulling from git, svn, http, or any source
+- Reading or writing files outside `{deploy_path}` and `/etc/domain-platform`
+- Loading dynamic plugins / `os.Plugin`
+- Network calls to anywhere except the control plane and S3 / MinIO
+- Storing third-party API tokens
+
+This is enforced by:
+
+- Code review on every PR touching `cmd/agent/`
+- A `make check-agent-safety` grep gate that rejects PRs adding `os/exec`,
+  `plugin`, or `net/http.Get` to URL-derived addresses
+- The Opus model is required for any `cmd/agent/` PR per the Model Selection
+  Policy
+
+### 3.4 Wire protocol (in `pkg/agentprotocol`)
+
+```go
+// Registration
+type RegisterRequest struct {
+    Hostname     string            `json:"hostname"`
+    IP           string            `json:"ip"`
+    Region       string            `json:"region"`
+    Datacenter   string            `json:"datacenter"`
+    HostGroup    string            `json:"host_group"`
+    AgentVersion string            `json:"agent_version"`
+    Capabilities []string          `json:"capabilities"`
+    Tags         map[string]string `json:"tags,omitempty"`
+}
+type RegisterResponse struct {
+    AgentID    string `json:"agent_id"`
+    AssignedAt int64  `json:"assigned_at"`
+}
+
+// Heartbeat
+type HeartbeatRequest struct {
+    AgentID         string  `json:"agent_id"`
+    Status          string  `json:"status"`     // online | busy | idle | draining | error
+    CurrentTaskID   string  `json:"current_task_id,omitempty"`
+    AgentVersion    string  `json:"agent_version"`
+    LoadAvg1        float64 `json:"load_avg_1,omitempty"`
+    DiskFreePercent float64 `json:"disk_free_percent,omitempty"`
+    LastError       string  `json:"last_error,omitempty"`
+    Timestamp       int64   `json:"timestamp"`
+}
+type HeartbeatResponse struct {
+    AcceptedAt        int64  `json:"accepted_at"`
+    NextPollAfterMS   int    `json:"next_poll_after_ms"` // backoff hint
+    DesiredAgentVersion string `json:"desired_agent_version,omitempty"`
+}
+
+// Task pull (long-poll)
+type TaskEnvelope struct {
+    TaskID       string         `json:"task_id"`
+    ReleaseID    string         `json:"release_id"`
+    ArtifactID   string         `json:"artifact_id"`
+    ArtifactURL  string         `json:"artifact_url"`  // signed URL
+    ManifestSHA  string         `json:"manifest_sha"`
+    DeployPath   string         `json:"deploy_path"`
+    Type         string         `json:"type"`          // html | nginx | full
+    AllowReload  bool           `json:"allow_reload"`
+    LocalVerify  *VerifyConfig  `json:"local_verify,omitempty"`
+    TimeoutSec   int            `json:"timeout_sec"`
+}
+
+// Report
+type TaskReport struct {
+    TaskID      string `json:"task_id"`
+    AgentID     string `json:"agent_id"`
+    Status      string `json:"status"`        // success | failed | timeout
+    DurationMS  int64  `json:"duration_ms"`
+    Phases      []PhaseReport `json:"phases"` // download / verify / write / nginx_test / swap / reload / verify
+    LastError   string `json:"last_error,omitempty"`
+    NewVersion  string `json:"new_version,omitempty"`
+}
+```
+
+### 3.5 mTLS
+
+- A platform-internal CA issues per-agent client certificates
+- Agent stores its key + cert in `/etc/domain-platform/agent.{key,crt}`
+  (mode 0600, owned by the agent service user)
+- Control plane verifies the client cert chain against the platform CA on
+  every `/agent/v1/*` request
+- Certificate validity: 1 year by default (`AGENT_CERT_VALIDITY=8760h`)
+- Rotation: agent self-rotates 30 days before expiry by calling
+  `POST /agent/v1/cert/rotate` (returns a new cert + key)
+- Revocation: control plane maintains a CRL in Redis (`agent:crl` set);
+  middleware checks this on every request
+- Cert serial → agent_id mapping is in the `agents` table
+
+### 3.6 Self-upgrade
+
+Per PRD §21, agent self-upgrade follows canary semantics:
+
+1. Operator tags a new agent binary version in `agent_versions` (uploaded to MinIO)
+2. Operator creates an `agent_upgrade_jobs` row with target version + scope (host group / tags)
+3. Control plane picks N (canary count, default 3) agents and sends upgrade tasks
+4. Each canary agent: download new binary → checksum verify → swap → systemd restart
+5. After restart the new agent registers fresh, heartbeats, and reports its new version
+6. Control plane monitors canary for 30 minutes
+7. If all healthy → expand to 25% → 50% → 100% (configurable)
+8. If any error → halt upgrade, leave canaries on new version, alert operator
+9. Operator can roll back: `agent_upgrade_jobs.rollback_version` triggers another upgrade in reverse
+
+---
+
+## 4. Data Architecture
+
+### 4.1 PostgreSQL Tables
+
+See `docs/DATABASE_SCHEMA.md` for the authoritative schema. High-level groups:
+
+| Group | Tables |
+|---|---|
+| Identity | `users`, `roles`, `user_roles` |
+| Project | `projects` |
+| Domain Lifecycle | `domains`, `domain_variables`, `domain_lifecycle_history` |
+| Template | `templates`, `template_versions` |
+| Artifact | `artifacts` |
+| Release | `releases`, `release_scopes`, `release_shards`, `release_state_history` |
+| Tasks | `domain_tasks`, `agent_tasks`, `deployment_logs` |
+| Rollback | `rollback_records` |
+| Probe | `probe_policies`, `probe_tasks` (TimescaleDB: `probe_results`) |
+| Alert | `alert_events`, `notification_rules` |
+| Agent | `agents`, `agent_heartbeats`, `agent_versions`, `agent_upgrade_jobs`, `agent_logs`, `agent_state_history` |
+| Approval | `approval_requests` (Phase 4) |
+| Audit | `audit_logs` |
+
+### 4.2 TimescaleDB
+
+Only `probe_results` is a hypertable. 90-day retention. Excluded from
+nightly `pg_dump`. Compaction: chunks > 7 days are compressed.
+
+### 4.3 Redis Key Design
 
 ```
-# Domain current status (for alert dedup)
-domain:status:{probe_node}:{domain} → "ok" | "dns_poison" | "tcp_block" | ...
-TTL: 3600s
+# Distributed locks
+release:lock:{release_id}              SET NX PX  Release planning lock
+release:dispatch:lock:{shard_id}       SET NX PX  Shard dispatch lock
+domain_task:lock:{domain_id}           SET NX PX  Per-domain task lock
+agent:cert:rotate:{agent_id}           SET NX PX  Cert rotation lock
 
-# Alert dedup
-alert:dedup:{probe_node}:{domain}:{status} → "1"
-TTL: 3600s (same status won't re-alert within 1 hour)
+# Counters
+project:concurrent_shards:{project_id}    INCR/DECR    For 4-layer concurrency limits
+agent:concurrent_tasks:{agent_id}         INCR/DECR
 
-# nginx reload buffer
-reload:buffer:{server_id} → SET of domain_task_ids
-TTL: 60s (auto-flush if not manually triggered)
+# Dedup / aggregation
+alert_dedup:{type}:{target}               SET EX       Alert dedup
+nginx_reload_buffer:{agent_id}            LIST + EXPIRE
 
-# Auto-switch distributed lock — fast path (ADR-0002 D1)
-# This key is the FAST path only. Postgres `SELECT ... FOR UPDATE` on
-# main_domains is the authoritative lock. Redis loss must NOT enable
-# double switching — see §2.5 auto-switch flow step 0.
-switch:lock:{main_domain_id} → worker_id
-TTL: 600s (hard ceiling for a full switch cycle; also bounds the maximum
-       time the Postgres row lock can be held)
+# Long-poll synchronization
+agent:tasks:available:{agent_id}          PUB/SUB      Notify agent there's a new task
 
-# Release pause flag — set by P0/P1 auto-pause, read by release scheduler
-release:pause:{project_id} → reason_code
-TTL: none (manually cleared by operator)
+# Certificate revocation list
+agent:crl                                 SET (members are cert serials)
 
-# Probe cross-cycle consecutive-failure counter (see §2.4 confirmation path)
-probe:fail_streak:{probe_node}:{domain} → integer
-TTL: 300s (resets if no updates)
-
-# asynq internal keys — reserved namespace, do not reuse
-asynq:* → managed by hibiken/asynq, do not write manually
+# asynq internal keys
+asynq:*                                   reserved by hibiken/asynq
 ```
 
 ---
 
-## 4. Communication Security
+## 5. Communication Security
 
-### Probe ↔ Controller: mTLS
+### 5.1 Agent ↔ Control Plane: mTLS
 
-```
-CN Probe Node                    Probe Controller
-┌──────────┐    TLS 1.3 mTLS    ┌──────────────┐
-│ Client   │ ──────────────────→ │ Server       │
-│ Cert     │                     │ Cert         │
-│ (unique) │                     │ (controller) │
-└──────────┘                     └──────────────┘
-     │                                  │
-     └──── Both signed by ─────────────┘
-           Internal CA
-```
+- Platform CA issues per-agent client certificates
+- Server certificate is the standard public web cert (Let's Encrypt via Caddy)
+- Both sides verify
+- Client cert revocation list (CRL) checked on every request
+- See §3.5 for cert rotation
 
-- Each probe gets a unique client certificate signed by internal CA
-- Controller validates client cert against CA root — rejects unknown probes
-- Certificate rotation: every 90 days, 7-day overlap grace period
-- Failed auth: reject immediately, do NOT return error details
+### 5.2 Management Console: JWT + HTTPS
 
-### Management Console: JWT + HTTPS
+- JWT Bearer tokens issued by `/api/v1/auth/login` (username + password,
+  bcrypt)
+- 24-hour validity by default; refreshable
+- Stored in localStorage on the SPA side
+- Caddy handles HTTPS termination
+- All `/api/v1/*` routes require valid JWT except `/api/v1/auth/login`
 
-- Caddy handles HTTPS (auto Let's Encrypt)
-- JWT tokens: 24h expiry, HS256 signed
-- Password storage: bcrypt, cost factor 12
-- Rate limiting: login endpoint 10 req/min
-- **Login identifier = `username`, NOT email.** This is an internal operator console; user
-  accounts are provisioned manually and do not carry email. Any future password-reset or
-  notification feature MUST use an out-of-band channel (Telegram), not email.
+### 5.3 Artifact Storage Access
 
----
+- Control plane uses MinIO root credentials (or scoped IAM role) to write
+- Agents receive **time-limited signed URLs** (presigned, 15-minute validity)
+  in their task envelopes — they never hold permanent S3 credentials
+- Bucket policy: control plane RW, agents read-only via presigned URLs only
 
-## 5. Deployment Topology
+### 5.4 Secrets Management
 
-### Phase 1 (5 machines)
-
-```
-┌─── Taiwan ─────────────────────────────────────┐
-│                                                 │
-│  Main Node (8C/32G SSD)                        │
-│  ┌─────────────────────────────────────┐       │
-│  │ Caddy (reverse proxy + static)      │       │
-│  │ domain-platform (Gin API :8080)     │       │
-│  │ domain-worker (asynq worker)        │       │
-│  │ PostgreSQL 16 + TimescaleDB (:5432) │       │
-│  │ Redis 7 (:6379)                     │       │
-│  └─────────────────────────────────────┘       │
-│                                                 │
-│  Probe Controller (2C/4G)                      │
-│  ┌─────────────────────────────────────┐       │
-│  │ domain-platform probe-receiver      │       │
-│  │ Alert Engine + Telegram Bot         │       │
-│  │ Auto-Switch Engine                  │       │
-│  └─────────────────────────────────────┘       │
-│                                                 │
-└─────────────────────────────────────────────────┘
-
-┌─── Mainland China ─────────────────────────────┐
-│  cn-probe-ct (Telecom, 1C/1G)  → Go Scanner   │
-│  cn-probe-cu (Unicom,  1C/1G)  → Go Scanner   │
-│  cn-probe-cm (Mobile,  1C/1G)  → Go Scanner   │
-└─────────────────────────────────────────────────┘
-```
-
-### Phase 2 Expansion
-
-- Separate Deploy Worker (8C/16G) for batch release CPU-intensive work
-- CN probes: 3 → 6 (2 per ISP, north + south coverage)
-- Consider ClickHouse migration if TimescaleDB queries degrade
-
-### Backup & Disaster Recovery (applies from Phase 1)
-
-- **PostgreSQL**: daily `pg_dump` at 04:00 local, retained 14 days on the main node; WAL
-  archiving to an off-site object store with 7-day retention; weekly full base backup
-  shipped off-site, retained 8 weeks.
-- **TimescaleDB hypertable** (`probe_results`): not included in nightly dump (90-day
-  retention policy already acts as bounded state). Continuous aggregates (`probe_hourly`)
-  ARE dumped.
-- **Redis**: AOF `everysec` on the main node. Redis holds only ephemeral state (alert
-  dedup, reload buffers, locks) — loss is tolerable but causes brief re-alert storms.
-- **Config & secrets**: `configs/providers.yaml` and JWT/CA material are versioned in a
-  private repo, NOT in Postgres. Recovery requires both the DB backup and the config repo.
-- **RPO / RTO targets (Phase 1)**: RPO ≤ 24h (daily dump) / ≤ 5min (WAL); RTO ≤ 2h for
-  API+worker; probe nodes are stateless and can be re-provisioned from the scanner binary
-  and a fresh client cert.
+- DB password, JWT secret, S3 credentials, Telegram bot token, DNS provider
+  tokens: loaded from environment variables OR a secrets file outside the
+  repo (`configs/secrets.yaml`, gitignored)
+- For production: recommended to integrate with Vault / AWS Secrets Manager
+  / GCP Secret Manager (Phase 4)
+- Agent mTLS keys are generated per-agent and never committed
 
 ---
 
-## 6. Build & Deploy
+## 6. Deployment Topology
 
-### Build Artifacts
+### 6.1 Phase 1 minimum
+
+```
+┌── Platform side (single host or small cluster) ───────────┐
+│                                                             │
+│  ┌────────────────────────────────────────────────────────┐ │
+│  │ Caddy → cmd/server  (REST API on :8080)                │ │
+│  │         cmd/worker  (asynq workers)                    │ │
+│  │         cmd/server  (mTLS endpoint on :8443 for agents)│ │
+│  └────────────────────────────────────────────────────────┘ │
+│                                                             │
+│  ┌────────────────────────────────────────────────────────┐ │
+│  │ PostgreSQL 16 + TimescaleDB                            │ │
+│  │ Redis 7                                                │ │
+│  │ MinIO (artifact storage)                               │ │
+│  └────────────────────────────────────────────────────────┘ │
+└─────────────────────────────────────────────────────────────┘
+                              │
+                              │ mTLS (https + client cert)
+                              │
+            ┌─────────────────┼─────────────────┐
+            ▼                 ▼                 ▼
+    ┌──────────────┐  ┌──────────────┐  ┌──────────────┐
+    │ Nginx host 1 │  │ Nginx host 2 │  │  Nginx host N│
+    │ + cmd/agent  │  │ + cmd/agent  │  │ + cmd/agent  │
+    └──────────────┘  └──────────────┘  └──────────────┘
+```
+
+PRD §26 minimum recommendation for production:
+
+| Component | Sizing | Count |
+|---|---|---|
+| Control plane (server + worker, can be co-located) | 4C/8G | 2 (HA) |
+| PostgreSQL + TimescaleDB | 4C/16G + SSD | 1 (Phase 1), 2 with replication (Phase 4) |
+| Redis | 2C/4G | 1 |
+| MinIO | 4C/8G + storage | 1 (Phase 1), distributed (Phase 4) |
+| Probe runner (colocated with worker in P1) | 2C/4G | 1 (Phase 1), N (Phase 3) |
+| Pull Agent (per Nginx host) | trivial overhead | 1 per Nginx host |
+
+### 6.2 Backup & Disaster Recovery
+
+- **PostgreSQL**: nightly `pg_dump` of all business tables (everything except
+  `probe_results`); WAL archiving to off-site storage every 5 minutes (RPO ≤ 5min)
+- **MinIO**: lifecycle policy mirrors artifacts to a secondary bucket
+  (could be cross-region); artifacts are immutable so partial sync is safe
+- **Redis**: AOF `everysec` for asynq state; can be lost without data
+  corruption (releases will resume from DB state on restart)
+- **TimescaleDB `probe_results`**: 90-day retention, NOT backed up (loss
+  acceptable)
+- **Configs / secrets**: separate private repository, never in main repo
+- **RTO**: ≤ 2 hours for the platform; agents continue running last-known
+  releases without control plane
+- **Agent disconnection**: agents that lose control-plane connectivity stop
+  pulling new tasks but the last deployed artifact continues serving traffic
+  (zero impact on running production)
+
+---
+
+## 7. Build & Deploy
+
+### 7.1 Build Artifacts
+
+| Binary | Source | Target | Size (target) |
+|---|---|---|---|
+| `server` | `cmd/server` | linux/amd64 | < 25 MB |
+| `worker` | `cmd/worker` | linux/amd64 | < 25 MB |
+| `migrate` | `cmd/migrate` | linux/amd64 | < 15 MB |
+| `agent` | `cmd/agent` | **linux/amd64 (cross-compiled from any host)** | < 20 MB |
 
 ```bash
-# API + Web server
-GOOS=linux GOARCH=amd64 go build -o bin/domain-platform ./cmd/server
-
-# Task worker
-GOOS=linux GOARCH=amd64 go build -o bin/domain-worker ./cmd/worker
-
-# Probe scanner (for CN nodes)
-GOOS=linux GOARCH=amd64 go build -o bin/domain-scanner ./cmd/scanner
-
-# DB migration tool
-GOOS=linux GOARCH=amd64 go build -o bin/domain-migrate ./cmd/migrate
-
-# Vue frontend
-cd web && npm run build  # outputs to web/dist/
-# Vite emits hashed chunks (e.g. assets/index.[hash].js), so JS/CSS are cache-safe.
-# index.html MUST be served with `Cache-Control: no-cache` by Caddy, otherwise SPA users
-# will keep loading stale chunk manifests after a deploy.
+make build       # builds server worker migrate agent
+make agent       # cross-compile agent only (most common during agent dev)
+make web         # builds Vue dist into web/dist/
 ```
 
-### Deployment Process
+### 7.2 Frontend Cache Rule (carried from ADR-0001 D12)
 
-```bash
-# 1. Build
-make build && make web
+`web/dist/index.html` must be served by Caddy with `Cache-Control: no-cache`.
+Vite already emits hashed JS chunks; without this header, users open the
+console pre-deploy and load stale chunk manifests post-deploy, hitting 404s.
 
-# 2. Upload
-scp bin/domain-platform bin/domain-worker user@main-node:/opt/domain-platform/
-scp -r web/dist/ user@main-node:/opt/domain-platform/web/dist/
-scp bin/domain-scanner user@cn-probe-ct:/opt/domain-scanner/
+### 7.3 Deployment Process
 
-# 3. Migrate
-ssh main-node "/opt/domain-platform/domain-migrate up"
+1. Build binaries on a CI runner (or developer machine)
+2. `scp` binaries to platform host(s)
+3. `systemctl restart domain-server domain-worker`
+4. Run `make migrate-up` if migrations are pending
+5. For agents: upload new agent binary as a new `agent_versions` row in MinIO,
+   then create an `agent_upgrade_jobs` row to roll it out via canary
 
-# 4. Restart
-ssh main-node "sudo systemctl restart domain-platform domain-worker"
-ssh cn-probe-ct "sudo systemctl restart domain-scanner"
+---
 
-# 5. Verify
-curl https://platform.example.com/health
-```
+## 8. Implementation Phases
+
+The phasing is **per PRD §28**, with Phase 1 expanded to include the platform
+foundation.
+
+| Phase | Scope | Gate |
+|---|---|---|
+| **Phase 1** | Project / Domain (basic CRUD, auto-approve) / Template / Artifact build / Basic Release (no sharding, no canary, no probe) / Agent (register / heartbeat / pull / report) | A user can: log in → create project → register domain → write template → publish version → create release → agent picks up task → deploys → reports back → see in UI |
+| **Phase 2** | Sharding / Rollback / Dry-run / Diff / Per-host concurrency limit / Agent management UI (list, drain, disable) | Multi-shard releases with rollback work end-to-end; operator can drain an agent |
+| **Phase 3** | Gray release (canary) / Probe L1+L2+L3 / Alert engine with dedup / Agent canary upgrade | Releases are gated by probe verification; alerts deduplicate; agents self-upgrade |
+| **Phase 4** | Domain lifecycle approval flow / Nginx artifact deployment (separated from HTML) / Approval flow / High availability | Production releases require approved approval row; nginx releases require Release Manager |
+| **(Future, unscheduled)** | GFW vertical (separate ADR-0004 or later) | N/A |
+
+The Phase 1 task list is in `docs/PHASE1_TASKLIST.md`.

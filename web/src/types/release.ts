@@ -1,24 +1,59 @@
-import type { ReleaseStatus } from './common'
+import type { ReleaseStatus, ReleaseType } from './common'
+
+// Mirror of internal/release DTOs (Go side). Keep in sync.
 
 export interface ReleaseResponse {
-  uuid:             string
-  project_id:       number
-  title:            string | null
-  status:           ReleaseStatus
-  total_domains:    number
-  shard_size:       number
-  canary_threshold: number
-  created_at:       string
-  updated_at:       string
+  uuid:                 string
+  release_id:           string                // "rel_01HXYZ..."
+  project_id:           number
+  project_name?:        string                // populated by handler join
+  template_version_id:  number
+  template_version?:    string                // version_label, populated by handler join
+  artifact_id:          number | null
+  release_type:         ReleaseType
+  trigger_source:       'ui' | 'api' | 'webhook' | 'scheduler'
+  status:               ReleaseStatus
+  requires_approval:    boolean
+  canary_shard_size:    number
+  shard_size:           number
+  total_domains:        number | null
+  total_shards:         number | null
+  success_count:        number
+  failure_count:        number
+  description:          string | null
+  created_at:           string
+  created_by:           number
+  started_at:           string | null
+  ended_at:             string | null
 }
 
-export interface ShardResponse {
+export interface CreateReleaseRequest {
+  project_id:           number
+  template_version_id:  number
+  release_type:         ReleaseType
+  domain_ids:           number[]
+  host_group_ids?:      number[]
+  description?:         string
+}
+
+export interface ReleaseShardResponse {
   id:            number
   shard_index:   number
-  status:        string
+  is_canary:     boolean
   domain_count:  number
+  status:        'pending' | 'dispatching' | 'running' | 'paused' | 'succeeded' | 'failed' | 'cancelled'
   success_count: number
-  fail_count:    number
+  failure_count: number
+  pause_reason:  string | null
   started_at:    string | null
-  completed_at:  string | null
+  ended_at:      string | null
+}
+
+export interface ReleaseStateHistoryEntry {
+  id:           number
+  from_state:   ReleaseStatus | null
+  to_state:     ReleaseStatus
+  reason:       string | null
+  triggered_by: string
+  created_at:   string
 }

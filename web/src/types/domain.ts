@@ -1,41 +1,46 @@
-import type { DomainStatus } from './common'
+import type { DomainLifecycleState } from './common'
 
-export interface SubdomainResponse {
-  uuid:           string
-  prefix:         string
-  fqdn:           string
-  dns_provider:   string
-  cdn_provider:   string
-  nginx_template: string
-  dns_record_id:  string | null
-  cdn_domain_id:  string | null
-  ssl_expiry:     string | null
-  created_at:     string
-  updated_at:     string
-}
+// Mirror of internal/lifecycle DTOs (Go side). Keep in sync.
+// Per ADR-0003, domains are flat — no main/subdomain hierarchy, no prefix rules.
 
 export interface DomainResponse {
-  uuid:        string
-  domain:      string
-  status:      DomainStatus
-  project_id:  number
-  conf_path:   string | null
-  subdomains?: SubdomainResponse[]
-  created_at:  string
-  updated_at:  string
+  uuid:            string
+  fqdn:            string
+  project_id:      number
+  lifecycle_state: DomainLifecycleState
+  owner_user_id:   number | null
+  dns_provider:    string | null
+  dns_zone:        string | null
+  tags?:           string[]
+  created_at:      string
+  updated_at:      string
 }
 
-export interface CreateDomainRequest {
-  domain:     string
-  project_id: number
-  prefixes:   string[]
+export interface RegisterDomainRequest {
+  project_id:    number
+  fqdn:          string
+  owner_user_id?: number
+  dns_provider?: string
+  dns_zone?:     string
+  tags?:         string[]
 }
 
-export interface DomainStateHistory {
-  id:          number
-  from_status: DomainStatus
-  to_status:   DomainStatus
-  reason:      string | null
+export interface DomainTransitionRequest {
+  to:     DomainLifecycleState
+  reason: string
+}
+
+export interface DomainLifecycleHistoryEntry {
+  id:           number
+  from_state:   DomainLifecycleState | null
+  to_state:     DomainLifecycleState
+  reason:       string | null
   triggered_by: string
-  changed_at:  string
+  created_at:   string
+}
+
+export interface DomainVariables {
+  domain_id:  number
+  variables:  Record<string, unknown>
+  updated_at: string
 }

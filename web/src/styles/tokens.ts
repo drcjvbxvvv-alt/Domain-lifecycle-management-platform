@@ -33,24 +33,23 @@ export const colors = {
   primaryHover:   '#3b6ef0',
   primaryPressed: '#2c5de0',
 
-  // Domain status — muted for light backgrounds
-  status: {
-    inactive:  { color: '#64748b', bg: 'rgba(100,116,139,0.08)' },
-    deploying: { color: '#d97706', bg: 'rgba(217,119,6,0.08)'   },
-    active:    { color: '#16a34a', bg: 'rgba(22,163,74,0.08)'   },
-    degraded:  { color: '#ea580c', bg: 'rgba(234,88,12,0.08)'   },
-    switching: { color: '#7c3aed', bg: 'rgba(124,58,237,0.08)'  },
-    suspended: { color: '#b45309', bg: 'rgba(180,83,9,0.08)'    },
-    failed:    { color: '#dc2626', bg: 'rgba(220,38,38,0.08)'   },
-    blocked:   { color: '#dc2626', bg: 'rgba(220,38,38,0.08)'   },
-    retired:   { color: '#94a3b8', bg: 'rgba(148,163,184,0.08)' },
+  // Status semantic colors — muted for light backgrounds.
+  // Three state machines (Domain Lifecycle / Release / Agent) all share
+  // these six semantic buckets via the StatusTag component's semanticMap.
+  // See FRONTEND_GUIDE.md §"顏色使用規範".
+  statusSemantic: {
+    success:   { color: '#16a34a', bg: 'rgba(22,163,74,0.08)'   },  // active, online, succeeded, idle
+    progress:  { color: '#d97706', bg: 'rgba(217,119,6,0.08)'   },  // executing, busy, provisioned, pending, planning, ready
+    warning:   { color: '#ea580c', bg: 'rgba(234,88,12,0.08)'   },  // paused, draining, requested, approved
+    danger:    { color: '#dc2626', bg: 'rgba(220,38,38,0.08)'   },  // failed, error, rolling_back, rolled_back, disabled, offline
+    neutral:   { color: '#94a3b8', bg: 'rgba(148,163,184,0.08)' },  // retired, cancelled, registered
+    upgrading: { color: '#7c3aed', bg: 'rgba(124,58,237,0.08)'  },  // upgrading
   },
 
-  // Alert severity — crisp but not glaring
+  // Alert severity (PRD §16 — P1 / P2 / P3 / INFO)
   severity: {
-    P0:   { color: '#dc2626', bg: 'rgba(220,38,38,0.08)'   },
-    P1:   { color: '#ea580c', bg: 'rgba(234,88,12,0.08)'   },
-    P2:   { color: '#d97706', bg: 'rgba(217,119,6,0.08)'   },
+    P1:   { color: '#dc2626', bg: 'rgba(220,38,38,0.08)'   },
+    P2:   { color: '#ea580c', bg: 'rgba(234,88,12,0.08)'   },
     P3:   { color: '#2563eb', bg: 'rgba(37,99,235,0.08)'   },
     INFO: { color: '#16a34a', bg: 'rgba(22,163,74,0.08)'   },
   },

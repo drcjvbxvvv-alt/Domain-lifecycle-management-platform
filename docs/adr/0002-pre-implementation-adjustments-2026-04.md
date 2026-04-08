@@ -1,14 +1,49 @@
 # ADR-0002: Pre-implementation adjustments — April 2026
 
-- **Status**: Accepted
+> ## ⚠ SUPERSEDED by ADR-0003 (2026-04-09)
+>
+> **This ADR records six pre-implementation decisions for a GFW-failover
+> system that the project no longer pursues.** It is preserved as historical
+> record only.
+>
+> Of the six decisions in this ADR:
+>
+> - **D1** (switch lock dual fallback) — dead. There is no `internal/switcher`
+>   in the new architecture.
+> - **D2** (single write path for `main_domains.status`) — **methodology
+>   preserved**, applied to new state machines (Domain Lifecycle, Release,
+>   Agent) per ADR-0003 D9.
+> - **D3** (`prefix_rules` soft-freeze + rebuild release) — dead. There is no
+>   `prefix_rules` table in the new architecture.
+> - **D4** (CDN `CloneConfig` idempotency) — **methodology preserved**,
+>   applied to artifact build steps and agent task application per
+>   ADR-0003 D9.
+> - **D5** (asynq queue priorities) — partially preserved as a general
+>   pattern; the specific queue layout is rewritten because the task types
+>   are different.
+> - **D6** (pool `promoted` lifecycle) — dead. There is no `main_domain_pool`
+>   in the new architecture.
+>
+> Execution items E1 (60s L1 cycle load test), E2 (CI grep gate for
+> `UPDATE main_domains SET status`), and E3 (Redis-loss disaster drill) are
+> all dead in their original form. The grep-gate methodology survives —
+> see ADR-0003 D9 for the new gates (`check-lifecycle-writes`,
+> `check-release-writes`, `check-agent-writes`).
+>
+> **Do NOT use the decisions in this ADR as current ground truth.** See
+> [`docs/adr/0003-pivot-to-generic-release-platform-2026-04.md`](0003-pivot-to-generic-release-platform-2026-04.md)
+> for the current architecture.
+
+- **Status**: ~~Accepted~~ **Superseded by ADR-0003 (2026-04-09)**
 - **Date**: 2026-04-08
-- **Scope**: `CLAUDE.md`, `docs/ARCHITECTURE.md`, `docs/DATABASE_SCHEMA.md`,
+- **Scope** *(historical)*: `CLAUDE.md`, `docs/ARCHITECTURE.md`, `docs/DATABASE_SCHEMA.md`,
   `docs/DEVELOPMENT_PLAYBOOK.md`, `docs/CLAUDE_CODE_INSTRUCTIONS.md`, `README.md`
 - **Builds on**: ADR-0001 (2026-04-08)
+- **Superseded by**: [ADR-0003](0003-pivot-to-generic-release-platform-2026-04.md)
 
 ---
 
-## Context
+## Context *(historical — describes a system that was never built)*
 
 Before writing any production code, a second architecture review of the
 ADR-0001 output surfaced six gaps that ADR-0001 did not cover:

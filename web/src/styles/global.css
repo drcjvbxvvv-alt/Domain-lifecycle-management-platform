@@ -28,33 +28,26 @@
   --primary-hover:   #3b6ef0;
   --primary-pressed: #2c5de0;
 
-  /* Domain status */
-  --status-inactive-color:  #64748b;
-  --status-inactive-bg:     rgba(100, 116, 139, 0.08);
-  --status-deploying-color: #d97706;
-  --status-deploying-bg:    rgba(217, 119,   6, 0.08);
-  --status-active-color:    #16a34a;
-  --status-active-bg:       rgba( 22, 163,  74, 0.08);
-  --status-degraded-color:  #ea580c;
-  --status-degraded-bg:     rgba(234,  88,  12, 0.08);
-  --status-switching-color: #7c3aed;
-  --status-switching-bg:    rgba(124,  58, 237, 0.08);
-  --status-suspended-color: #b45309;
-  --status-suspended-bg:    rgba(180,  83,   9, 0.08);
-  --status-failed-color:    #dc2626;
-  --status-failed-bg:       rgba(220,  38,  38, 0.08);
-  --status-blocked-color:   #dc2626;
-  --status-blocked-bg:      rgba(220,  38,  38, 0.08);
-  --status-retired-color:   #94a3b8;
-  --status-retired-bg:      rgba(148, 163, 184, 0.08);
+  /* Status semantic colors — shared by all 3 state machines (Domain Lifecycle / Release / Agent).
+     Each status value maps to one semantic via StatusTag.vue. See FRONTEND_GUIDE.md. */
+  --status-success-color:   #16a34a;
+  --status-success-bg:      rgba( 22, 163,  74, 0.08);
+  --status-progress-color:  #d97706;
+  --status-progress-bg:     rgba(217, 119,   6, 0.08);
+  --status-warning-color:   #ea580c;
+  --status-warning-bg:      rgba(234,  88,  12, 0.08);
+  --status-danger-color:    #dc2626;
+  --status-danger-bg:       rgba(220,  38,  38, 0.08);
+  --status-neutral-color:   #94a3b8;
+  --status-neutral-bg:      rgba(148, 163, 184, 0.08);
+  --status-upgrading-color: #7c3aed;
+  --status-upgrading-bg:    rgba(124,  58, 237, 0.08);
 
-  /* Alert severity */
-  --severity-p0-color:   #dc2626;
-  --severity-p0-bg:      rgba(220,  38,  38, 0.08);
-  --severity-p1-color:   #ea580c;
-  --severity-p1-bg:      rgba(234,  88,  12, 0.08);
-  --severity-p2-color:   #d97706;
-  --severity-p2-bg:      rgba(217, 119,   6, 0.08);
+  /* Alert severity (PRD §16 — P1 / P2 / P3 / INFO) */
+  --severity-p1-color:   #dc2626;
+  --severity-p1-bg:      rgba(220,  38,  38, 0.08);
+  --severity-p2-color:   #ea580c;
+  --severity-p2-bg:      rgba(234,  88,  12, 0.08);
   --severity-p3-color:   #2563eb;
   --severity-p3-bg:      rgba( 37,  99, 235, 0.08);
   --severity-info-color: #16a34a;

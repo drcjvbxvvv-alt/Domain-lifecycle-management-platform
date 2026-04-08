@@ -1,13 +1,37 @@
 # ADR-0001: Architecture revision — April 2026
 
-- **Status**: Accepted
+> ## ⚠ SUPERSEDED by ADR-0003 (2026-04-09)
+>
+> **This ADR describes the architecture of a GFW-failover system that the
+> project no longer pursues.** It is preserved as historical record only.
+>
+> On 2026-04-09 the user confirmed that the entire "12,000 domains + GFW
+> failover + < 2 min detection / < 5 min switch" framing was introduced by
+> an earlier AI session and was never an actual product requirement. The
+> project pivoted to a generic HTML+Nginx release platform per a new PRD.
+>
+> **Do NOT use the decisions in this ADR as current ground truth.** See
+> [`docs/adr/0003-pivot-to-generic-release-platform-2026-04.md`](0003-pivot-to-generic-release-platform-2026-04.md)
+> for the current architecture. Most concepts referenced below — `prefix_rules`,
+> `main_domains` / `subdomains`, `main_domain_pool`, `internal/switcher`,
+> `cmd/scanner`'s GFW probe, the L1 60-second cycle, the auto-switch
+> double-lock, the standby pool warmup lifecycle — **no longer exist** in
+> the current architecture.
+>
+> Some patterns from this ADR survived the pivot and were ported to
+> ADR-0003 D9 (single state-machine write path, ADR culture, idempotency
+> contracts, race tests with `-race -count=50`, the pre-launch migration
+> exception). The rest is dead.
+
+- **Status**: ~~Accepted~~ **Superseded by ADR-0003 (2026-04-09)**
 - **Date**: 2026-04-08
-- **Scope**: `docs/ARCHITECTURE.md`, `docs/DATABASE_SCHEMA.md`, `docs/DEVELOPMENT_PLAYBOOK.md`
+- **Scope** *(historical)*: `docs/ARCHITECTURE.md`, `docs/DATABASE_SCHEMA.md`, `docs/DEVELOPMENT_PLAYBOOK.md`
 - **Supersedes**: original versions of the three documents above (pre-2026-04-08)
+- **Superseded by**: [ADR-0003](0003-pivot-to-generic-release-platform-2026-04.md)
 
 ---
 
-## Context
+## Context *(historical — describes a system that was never built)*
 
 The original architecture / schema / playbook documents were authored early in the
 project and accumulated several inconsistencies by April 2026:

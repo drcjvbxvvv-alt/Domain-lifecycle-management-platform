@@ -1,145 +1,183 @@
 # DEVELOPMENT_PLAYBOOK.md — Step-by-Step Implementation Guide
 
-> This document tells Claude Code exactly HOW to implement each feature.
-> Follow the patterns here. Do not invent new patterns unless explicitly asked.
+> **Aligned with PRD + ADR-0003 (2026-04-09).** This document tells Claude
+> Code exactly HOW to implement each feature pattern. Follow the patterns
+> here. Do not invent new patterns unless explicitly asked.
 
 ---
 
-## 1. How to Add a New API Endpoint
+## Table of contents
+
+1. How to add a new API endpoint
+2. How to add a state machine transition (lifecycle / release / agent)
+3. How to add a DNS provider
+4. How to add an asynq task
+5. How to add an artifact build step
+6. How to add an agent task type
+7. How to add a probe check
+8. How to add a database migration
+9. How to add a Vue page
+10. How to dispatch a release
+11. Common patterns reference
+
+---
+
+## 1. How to add a new API endpoint
 
 ### Step 1: Define the handler
 
 ```go
-// api/handler/domain.go
+// api/handler/release.go
 
-// CreateDomain godoc
-// @Summary Register a new domain
-// @Tags domains
-// @Accept json
-// @Produce json
-// @Param body body CreateDomainRequest true "Domain registration"
-// @Success 201 {object} Response{data=DomainResponse}
-// @Failure 400 {object} Response
-// @Router /api/v1/domains [post]
-func (h *DomainHandler) Create(c *gin.Context) {
-    var req CreateDomainRequest
+// CreateRelease godoc
+// @Summary  Create a new release
+// @Tags     releases
+// @Accept   json
+// @Produce  json
+// @Param    body  body      CreateReleaseRequest  true  "Release request"
+// @Success  202   {object}  Response{data=ReleaseResponse}
+// @Failure  400   {object}  Response
+// @Failure  409   {object}  Response
+// @Router   /api/v1/releases [post]
+func (h *ReleaseHandler) Create(c *gin.Context) {
+    var req CreateReleaseRequest
     if err := c.ShouldBindJSON(&req); err != nil {
         c.JSON(http.StatusBadRequest, ErrorResponse(40001, err.Error()))
         return
     }
 
-    domain, err := h.service.Create(c.Request.Context(), &req)
+    rel, err := h.service.Create(c.Request.Context(), &req, currentUserID(c))
     if err != nil {
-        if errors.Is(err, ErrDomainExists) {
-            c.JSON(http.StatusConflict, ErrorResponse(40901, "domain already exists"))
-            return
+        switch {
+        case errors.Is(err, release.ErrInvalidScope):
+            c.JSON(http.StatusBadRequest, ErrorResponse(40002, "invalid release scope"))
+        case errors.Is(err, release.ErrApprovalRequired):
+            c.JSON(http.StatusConflict, ErrorResponse(40901, "approval required for prod release"))
+        default:
+            h.logger.Error("create release failed", zap.Error(err))
+            c.JSON(http.StatusInternalServerError, ErrorResponse(50000, "internal error"))
         }
-        h.logger.Error("create domain failed", zap.Error(err))
-        c.JSON(http.StatusInternalServerError, ErrorResponse(50000, "internal error"))
         return
     }
 
-    c.JSON(http.StatusCreated, SuccessResponse(domain.ToResponse()))
+    c.JSON(http.StatusAccepted, SuccessResponse(rel.ToResponse()))
 }
 ```
 
 ### Step 2: Add service method
 
 ```go
-// internal/domain/service.go
-func (s *Service) Create(ctx context.Context, req *CreateDomainRequest) (*MainDomain, error) {
-    // 1. Validate
-    if !isValidDomain(req.Domain) {
-        return nil, fmt.Errorf("invalid domain: %s", req.Domain)
+// internal/release/service.go
+func (s *Service) Create(ctx context.Context, req *CreateReleaseRequest, userID int64) (*Release, error) {
+    // 1. Validate scope
+    if len(req.DomainIDs) == 0 {
+        return nil, ErrInvalidScope
     }
 
-    // 2. Check duplicates
-    existing, _ := s.store.GetByDomain(ctx, req.Domain)
-    if existing != nil {
-        return nil, ErrDomainExists
+    // 2. Project must exist; user must have at least operator role
+    project, err := s.projectStore.GetByID(ctx, req.ProjectID)
+    if err != nil {
+        return nil, fmt.Errorf("get project: %w", err)
     }
 
-    // 3. Business logic in transaction
+    // 3. Approval check (Phase 4 will enforce; Phase 1 auto-approves)
+    requiresApproval := project.IsProd || req.ReleaseType == "nginx"
+
+    // 4. Begin transaction
     tx, err := s.db.BeginTxx(ctx, nil)
     if err != nil {
         return nil, fmt.Errorf("begin tx: %w", err)
     }
     defer tx.Rollback()
 
-    domain := &MainDomain{
-        UUID:      uuid.Must(uuid.NewV7()).String(),
-        Domain:    req.Domain,
-        ProjectID: req.ProjectID,
-        Status:    "inactive",
+    rel := &Release{
+        ReleaseID:        generateReleaseID(),
+        ProjectID:        req.ProjectID,
+        TemplateVersionID: req.TemplateVersionID,
+        ReleaseType:      req.ReleaseType,
+        TriggerSource:    "ui",
+        Status:           "pending",
+        RequiresApproval: requiresApproval,
+        CreatedBy:        userID,
     }
 
-    if err := s.store.CreateTx(ctx, tx, domain); err != nil {
-        return nil, fmt.Errorf("create domain: %w", err)
+    if err := s.store.CreateTx(ctx, tx, rel); err != nil {
+        return nil, fmt.Errorf("create release: %w", err)
     }
 
-    // 4. Auto-generate subdomains from prefix rules
-    rules, err := s.prefixStore.ListByProject(ctx, req.ProjectID)
-    if err != nil {
-        return nil, fmt.Errorf("list prefix rules: %w", err)
-    }
-
-    for _, prefix := range req.Prefixes {
-        rule := findRule(rules, prefix)
-        if rule == nil {
-            return nil, fmt.Errorf("unknown prefix: %s", prefix)
-        }
-        sub := &Subdomain{
-            MainDomainID: domain.ID,
-            Prefix:       prefix,
-            FQDN:         prefix + "." + domain.Domain,
-            DNSProvider:   rule.DNSProvider,
-            CDNProvider:   rule.CDNProvider,
-            NginxTemplate: rule.NginxTemplate,
-        }
-        if err := s.subStore.CreateTx(ctx, tx, sub); err != nil {
-            return nil, fmt.Errorf("create subdomain %s: %w", sub.FQDN, err)
+    // 5. Insert release_scopes rows
+    for _, dID := range req.DomainIDs {
+        scope := ReleaseScope{ReleaseID: rel.ID, DomainID: dID, HostGroupID: req.HostGroupID}
+        if err := s.store.CreateScopeTx(ctx, tx, scope); err != nil {
+            return nil, fmt.Errorf("create scope: %w", err)
         }
     }
 
-    // 5. Audit log
-    s.audit.Log(ctx, AuditEntry{
-        Action:   "domain.created",
-        TargetID: domain.UUID,
-        Detail:   fmt.Sprintf("domain=%s project=%d prefixes=%v", domain.Domain, req.ProjectID, req.Prefixes),
+    // 6. Audit
+    s.audit.LogTx(ctx, tx, AuditEntry{
+        UserID: userID, Action: "release.created",
+        TargetKind: "release", TargetID: rel.ReleaseID,
+        Detail: map[string]any{"type": rel.ReleaseType, "scope_count": len(req.DomainIDs)},
     })
 
-    return domain, tx.Commit()
+    if err := tx.Commit(); err != nil {
+        return nil, fmt.Errorf("commit: %w", err)
+    }
+
+    // 7. Dispatch async planning task (after commit, never inside the tx)
+    payload, _ := json.Marshal(ReleasePlanPayload{ReleaseID: rel.ID})
+    task := asynq.NewTask(tasks.TypeReleasePlan, payload, asynq.Queue("release"))
+    if _, err := s.tasks.Enqueue(task); err != nil {
+        s.logger.Error("enqueue release plan failed", zap.String("release_id", rel.ReleaseID), zap.Error(err))
+        // The release row exists; a periodic janitor will pick it up. Do not fail the API call.
+    }
+
+    return rel, nil
 }
 ```
 
 ### Step 3: Add store method
 
 ```go
-// store/postgres/domain.go
-func (s *DomainStore) CreateTx(ctx context.Context, tx *sqlx.Tx, d *MainDomain) error {
-    const q = `
-        INSERT INTO main_domains (uuid, domain, project_id, status, created_at, updated_at)
-        VALUES ($1, $2, $3, $4, NOW(), NOW())
-        RETURNING id, created_at, updated_at`
-    return tx.QueryRowxContext(ctx, q, d.UUID, d.Domain, d.ProjectID, d.Status).
-        Scan(&d.ID, &d.CreatedAt, &d.UpdatedAt)
+// store/postgres/release.go
+const insertRelease = `
+    INSERT INTO releases (
+        uuid, release_id, project_id, template_version_id, release_type,
+        trigger_source, status, requires_approval, canary_shard_size, shard_size,
+        description, created_by
+    ) VALUES (
+        :uuid, :release_id, :project_id, :template_version_id, :release_type,
+        :trigger_source, :status, :requires_approval, :canary_shard_size, :shard_size,
+        :description, :created_by
+    ) RETURNING id`
+
+func (s *ReleaseStore) CreateTx(ctx context.Context, tx *sqlx.Tx, r *Release) error {
+    rows, err := tx.NamedQueryContext(ctx, insertRelease, r)
+    if err != nil {
+        return fmt.Errorf("insert release: %w", err)
+    }
+    defer rows.Close()
+    if rows.Next() {
+        return rows.Scan(&r.ID)
+    }
+    return errors.New("insert release: no rows returned")
 }
 ```
 
-### Step 4: Register route
+### Step 4: Register the route
 
 ```go
 // api/router/router.go
-func RegisterRoutes(r *gin.Engine, h *Handlers, mw *Middleware) {
-    v1 := r.Group("/api/v1")
-    v1.Use(mw.Auth())
-
-    domains := v1.Group("/domains")
+v1 := r.Group("/api/v1", middleware.Auth(jwtVerifier))
+{
+    releases := v1.Group("/releases", middleware.RequireRole("operator"))
     {
-        domains.GET("", mw.RequireRole("viewer"), h.Domain.List)
-        domains.POST("", mw.RequireRole("admin"), h.Domain.Create)
-        domains.GET("/:id", mw.RequireRole("viewer"), h.Domain.Get)
-        domains.POST("/:id/deploy", mw.RequireRole("release_manager"), h.Domain.Deploy)
+        releases.POST("",       releaseHandler.Create)
+        releases.GET("",        releaseHandler.List)
+        releases.GET("/:id",    releaseHandler.Get)
+        releases.POST("/:id/pause",    releaseHandler.Pause)
+        releases.POST("/:id/resume",   releaseHandler.Resume)
+        releases.POST("/:id/rollback", middleware.RequireRole("release_manager"), releaseHandler.Rollback)
     }
 }
 ```
@@ -147,127 +185,207 @@ func RegisterRoutes(r *gin.Engine, h *Handlers, mw *Middleware) {
 ### Step 5: Write tests
 
 ```go
-// api/handler/domain_test.go
-func TestCreateDomain(t *testing.T) {
-    // Setup mock service
-    svc := &mockDomainService{
-        createFn: func(ctx context.Context, req *CreateDomainRequest) (*MainDomain, error) {
-            return &MainDomain{UUID: "test-uuid", Domain: req.Domain, Status: "inactive"}, nil
-        },
-    }
-    handler := NewDomainHandler(svc, zap.NewNop())
-
-    // Create request
-    body := `{"domain":"example.com","project_id":1,"prefixes":["www","ws"]}`
-    req := httptest.NewRequest("POST", "/api/v1/domains", strings.NewReader(body))
-    req.Header.Set("Content-Type", "application/json")
-    w := httptest.NewRecorder()
-
-    // Execute
-    router := gin.New()
-    router.POST("/api/v1/domains", handler.Create)
-    router.ServeHTTP(w, req)
-
-    // Assert
-    assert.Equal(t, http.StatusCreated, w.Code)
-    var resp Response
-    json.Unmarshal(w.Body.Bytes(), &resp)
-    assert.Equal(t, 0, resp.Code)
+// internal/release/service_test.go
+func TestService_Create(t *testing.T) {
+    t.Run("happy path", func(t *testing.T) { /* ... */ })
+    t.Run("empty scope returns ErrInvalidScope", func(t *testing.T) { /* ... */ })
+    t.Run("nginx release on prod project requires approval", func(t *testing.T) { /* ... */ })
 }
 ```
 
 ---
 
-## 2. How to Add a New Provider
+## 2. How to add a state machine transition
 
-Example: Adding Tencent Cloud DNS
+The platform has three state machines, each with a single write path. Adding
+a new transition means adding it to the validity map AND verifying the
+caller goes through `Transition()`.
+
+### The pattern
+
+```go
+// internal/lifecycle/statemachine.go
+var validLifecycleTransitions = map[string][]string{
+    "requested":   {"approved", "retired"},
+    "approved":    {"provisioned", "retired"},
+    "provisioned": {"active", "disabled", "retired"},
+    "active":      {"disabled", "retired"},
+    "disabled":    {"active", "retired"},
+    "retired":     {},
+}
+
+func CanLifecycleTransition(from, to string) bool {
+    targets, ok := validLifecycleTransitions[from]
+    if !ok { return false }
+    for _, t := range targets {
+        if t == to { return true }
+    }
+    return false
+}
+```
+
+```go
+// internal/lifecycle/service.go — THE ONLY write path for domains.lifecycle_state
+func (s *Service) Transition(
+    ctx context.Context,
+    id int64,
+    from string,           // expected current state (optimistic check)
+    to string,
+    reason string,
+    triggeredBy string,    // "user:{uuid}" | "system" | "approval:{id}" | "provisioning"
+) error {
+    tx, err := s.db.BeginTxx(ctx, nil)
+    if err != nil {
+        return fmt.Errorf("begin tx: %w", err)
+    }
+    defer tx.Rollback()
+
+    var current string
+    err = tx.QueryRowxContext(ctx,
+        `SELECT lifecycle_state FROM domains WHERE id = $1 AND deleted_at IS NULL FOR UPDATE`, id,
+    ).Scan(&current)
+    if errors.Is(err, sql.ErrNoRows) {
+        return ErrDomainNotFound
+    }
+    if err != nil {
+        return fmt.Errorf("select for update: %w", err)
+    }
+
+    if current != from {
+        return ErrLifecycleRaceCondition
+    }
+    if !CanLifecycleTransition(from, to) {
+        return ErrInvalidLifecycleState
+    }
+
+    if err := s.store.updateLifecycleStateTx(ctx, tx, id, from, to); err != nil {
+        return fmt.Errorf("update state: %w", err)
+    }
+    if err := s.store.insertLifecycleHistoryTx(ctx, tx, LifecycleHistoryEntry{
+        DomainID: id, FromState: from, ToState: to,
+        Reason: reason, TriggeredBy: triggeredBy,
+    }); err != nil {
+        return fmt.Errorf("insert history: %w", err)
+    }
+
+    return tx.Commit()
+}
+```
+
+```go
+// store/postgres/lifecycle.go — THE ONLY file allowed to UPDATE domains.lifecycle_state
+const updateLifecycleStateSQL = `
+    UPDATE domains
+    SET lifecycle_state = $3, updated_at = NOW()
+    WHERE id = $1 AND lifecycle_state = $2`
+
+func (s *DomainStore) updateLifecycleStateTx(ctx context.Context, tx *sqlx.Tx, id int64, from, to string) error {
+    _, err := tx.ExecContext(ctx, updateLifecycleStateSQL, id, from, to)
+    return err
+}
+```
+
+### The CI gate
+
+```makefile
+# Makefile
+check-lifecycle-writes:
+	@hits=$$(grep -rn 'UPDATE domains SET lifecycle_state' --include='*.go' . | \
+		grep -v 'store/postgres/lifecycle.go' || true); \
+	if [ -n "$$hits" ]; then \
+		echo "ERROR: direct lifecycle_state writes found outside store/postgres/lifecycle.go:"; \
+		echo "$$hits"; exit 1; \
+	fi
+```
+
+The same pattern repeats for `release_state` (`make check-release-writes`)
+and `agent.status` (`make check-agent-writes`).
+
+### Race test (mandatory for state machine code)
+
+```go
+// internal/lifecycle/service_test.go
+func TestTransition_RaceCondition(t *testing.T) {
+    // Real DB needed; this is an integration test, not a pure unit test
+    db := setupTestDB(t)
+    s := NewService(db, ...)
+
+    domainID := createTestDomain(t, db, "active")
+
+    var winners, losers int32
+    var wg sync.WaitGroup
+    for i := 0; i < 10; i++ {
+        wg.Add(1)
+        go func() {
+            defer wg.Done()
+            err := s.Transition(ctx, domainID, "active", "disabled", "race test", "user:test")
+            if err == nil {
+                atomic.AddInt32(&winners, 1)
+            } else if errors.Is(err, ErrLifecycleRaceCondition) {
+                atomic.AddInt32(&losers, 1)
+            }
+        }()
+    }
+    wg.Wait()
+
+    require.Equal(t, int32(1), winners, "exactly one Transition must succeed")
+    require.Equal(t, int32(9), losers,  "nine Transitions must fail with ErrLifecycleRaceCondition")
+}
+```
+
+Run with `go test -race -count=50 ./internal/lifecycle/...` — must pass green
+in CI.
+
+---
+
+## 3. How to add a DNS provider
+
+The Domain Lifecycle module uses DNS providers to create records when a
+domain transitions from `approved` to `provisioned`.
 
 ### Step 1: Implement the interface
 
 ```go
-// pkg/provider/dns/tencent.go
+// pkg/provider/dns/cloudflare.go
 package dns
 
-import (
-    dnspod "github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/dnspod/v20210323"
-)
-
-type TencentProvider struct {
-    client *dnspod.Client
-    logger *zap.Logger
+type cloudflareProvider struct {
+    apiToken string
+    client   *http.Client
 }
 
-func NewTencentProvider(secretID, secretKey string, logger *zap.Logger) (*TencentProvider, error) {
-    credential := common.NewCredential(secretID, secretKey)
-    client, err := dnspod.NewClient(credential, "", profile.NewClientProfile())
-    if err != nil {
-        return nil, fmt.Errorf("create tencent dns client: %w", err)
+func NewCloudflareProvider(cfg Config) (Provider, error) {
+    if cfg.APIToken == "" {
+        return nil, errors.New("cloudflare: api_token required")
     }
-    return &TencentProvider{client: client, logger: logger}, nil
+    return &cloudflareProvider{apiToken: cfg.APIToken, client: defaultHTTPClient()}, nil
 }
 
-func (p *TencentProvider) Name() string { return "tencent" }
+func (p *cloudflareProvider) Name() string { return "cloudflare" }
 
-// IMPORTANT — CDN providers: CloneConfig MUST be idempotent (ADR-0002 D4).
-// Calling CloneConfig(src, dst) twice must converge to the same final state
-// as calling it once. Unit test `TestCloneConfig_Idempotent` is mandatory
-// for every CDN provider. See pkg/provider/cdn/*_test.go for the template.
-// DNS providers: TTL = 60 is a hard rule (ADR-0001 D3). Reject registration
-// if the provider cannot honor 60s TTL.
-
-func (p *TencentProvider) CreateRecord(ctx context.Context, zone string, record Record) (*Record, error) {
-    req := dnspod.NewCreateRecordRequest()
-    req.Domain = &zone
-    req.SubDomain = &record.Name
-    req.RecordType = &record.Type
-    req.Value = &record.Content
-    ttl := uint64(record.TTL)
-    req.TTL = &ttl
-    recordLine := "默认"
-    req.RecordLine = &recordLine
-
-    resp, err := p.client.CreateRecord(req)
-    if err != nil {
-        return nil, fmt.Errorf("tencent create record %s.%s: %w", record.Name, zone, err)
-    }
-
-    record.ID = fmt.Sprintf("%d", *resp.Response.RecordId)
-    return &record, nil
+func (p *cloudflareProvider) CreateRecord(ctx context.Context, zone string, rec Record) (*Record, error) {
+    // ... HTTP call to Cloudflare API
 }
 
-// ... implement DeleteRecord, ListRecords, UpdateRecord similarly
+func (p *cloudflareProvider) DeleteRecord(ctx context.Context, zone string, recordID string) error {
+    // ...
+}
+
+func (p *cloudflareProvider) ListRecords(ctx context.Context, zone string, filter RecordFilter) ([]Record, error) {
+    // ...
+}
+
+func (p *cloudflareProvider) UpdateRecord(ctx context.Context, zone string, recordID string, rec Record) (*Record, error) {
+    // ...
+}
 ```
 
-### Step 2: Register in the registry
+### Step 2: Register
 
 ```go
 // pkg/provider/dns/registry.go
-var registry = map[string]ProviderFactory{}
-
-type ProviderFactory func(cfg map[string]string, logger *zap.Logger) (Provider, error)
-
-func Register(name string, factory ProviderFactory) {
-    registry[name] = factory
-}
-
-func GetProvider(name string, cfg map[string]string, logger *zap.Logger) (Provider, error) {
-    factory, ok := registry[name]
-    if !ok {
-        return nil, fmt.Errorf("unknown dns provider: %s", name)
-    }
-    return factory(cfg, logger)
-}
-
 func init() {
-    Register("cloudflare", func(cfg map[string]string, l *zap.Logger) (Provider, error) {
-        return NewCloudflareProvider(cfg["api_token"], l)
-    })
-    Register("aliyun", func(cfg map[string]string, l *zap.Logger) (Provider, error) {
-        return NewAliyunProvider(cfg["access_key_id"], cfg["access_key_secret"], l)
-    })
-    Register("tencent", func(cfg map[string]string, l *zap.Logger) (Provider, error) {
-        return NewTencentProvider(cfg["secret_id"], cfg["secret_key"], l)
-    })
+    Register("cloudflare", NewCloudflareProvider)
 }
 ```
 
@@ -279,154 +397,466 @@ dns:
   cloudflare:
     api_token: "${CLOUDFLARE_API_TOKEN}"
   aliyun:
-    access_key_id: "${ALIYUN_ACCESS_KEY_ID}"
+    access_key_id:     "${ALIYUN_ACCESS_KEY_ID}"
     access_key_secret: "${ALIYUN_ACCESS_KEY_SECRET}"
-  tencent:
-    secret_id: "${TENCENT_SECRET_ID}"
-    secret_key: "${TENCENT_SECRET_KEY}"
 ```
 
-### Step 4: Write provider-specific tests
+### Step 4: Provider tests (table-driven, with httptest mock)
 
 ```go
-// pkg/provider/dns/tencent_test.go
-// Use build tags for integration tests that need real API keys
-//go:build integration
+// pkg/provider/dns/cloudflare_test.go
+func TestCloudflareProvider_CreateRecord(t *testing.T) {
+    server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        // assert request shape, return canned response
+    }))
+    defer server.Close()
 
-func TestTencentProvider_CreateRecord(t *testing.T) {
-    // Only runs with: go test -tags=integration ./pkg/provider/dns/ -run TestTencent
+    p := newCloudflareWithBaseURL(server.URL, "test-token")
+
+    rec, err := p.CreateRecord(context.Background(), "example.com",
+        Record{Type: "A", Name: "www", Content: "1.2.3.4", TTL: 300})
+    require.NoError(t, err)
+    require.NotEmpty(t, rec.ID)
 }
 ```
 
 ---
 
-## 3. How to Add a New asynq Task
+## 4. How to add an asynq task
 
-Example: Domain pre-warming task
-
-### Step 1: Define payload
+### Step 1: Add task type constant
 
 ```go
-// internal/tasks/pool_warmup.go
-type PoolWarmupPayload struct {
-    PoolDomainID int64  `json:"pool_domain_id"`
-    MainDomain   string `json:"main_domain"`
-    ProjectID    int64  `json:"project_id"`
+// internal/tasks/types.go
+const (
+    TypeArtifactBuild        = "artifact:build"
+    TypeArtifactSign         = "artifact:sign"
+    TypeReleasePlan          = "release:plan"
+    TypeReleaseDispatchShard = "release:dispatch_shard"
+    // ... add new constant here
+    TypeMyNewTask            = "myscope:my_action"
+)
+```
+
+### Step 2: Define payload struct
+
+```go
+// internal/tasks/payloads.go
+type MyNewTaskPayload struct {
+    TargetID int64  `json:"target_id"`
+    Reason   string `json:"reason"`
 }
 ```
 
-### Step 2: Implement handler
+### Step 3: Implement handler
 
 ```go
-func (h *TaskHandler) HandlePoolWarmup(ctx context.Context, t *asynq.Task) error {
-    var payload PoolWarmupPayload
-    if err := json.Unmarshal(t.Payload(), &payload); err != nil {
-        return fmt.Errorf("unmarshal warmup payload: %w", err)
+// internal/myscope/handler.go
+func (h *Handler) HandleMyNewTask(ctx context.Context, t *asynq.Task) error {
+    var p tasks.MyNewTaskPayload
+    if err := json.Unmarshal(t.Payload(), &p); err != nil {
+        return fmt.Errorf("unmarshal: %w", err)
     }
 
-    h.logger.Info("starting pool warmup",
-        zap.String("domain", payload.MainDomain),
-        zap.Int64("pool_domain_id", payload.PoolDomainID),
-    )
+    h.logger.Info("processing my new task",
+        zap.String("type", t.Type()),
+        zap.Int64("target_id", p.TargetID))
 
-    // Step 0: Transition pool row pending → warming (see ARCHITECTURE.md §2.6)
-    // Step 1: Create DNS records for all prefixes (TTL = 60, see §2.2 rule)
-    // Step 2: Create CDN configs for all prefixes
-    // Step 3: Wait for propagation
-    // Step 4: Probe verification — require ≥ majority of active CN probe nodes
-    //         (Phase 1: ≥ 2 of 3; Phase 2: ≥ 4 of 6)
-    // Step 5: Update status → ready on success, → pending on failure (with
-    //         warmup_attempts++ and warmup_last_error set). NEVER write 'standby'
-    //         or 'active' here — those names belong to the old schema.
+    if err := h.service.DoThing(ctx, p.TargetID, p.Reason); err != nil {
+        // Returning the error triggers asynq retry per task config
+        return fmt.Errorf("do thing: %w", err)
+    }
 
     return nil
 }
 ```
 
-### Step 3: Register in worker
+### Step 4: Register handler in worker
 
 ```go
 // cmd/worker/main.go
 mux := asynq.NewServeMux()
-mux.HandleFunc(tasks.TypeDNSCreateRecord, handler.HandleDNSCreate)
-mux.HandleFunc(tasks.TypePoolWarmup, handler.HandlePoolWarmup)
-// ... register all task types
+mux.HandleFunc(tasks.TypeMyNewTask, myscopeHandler.HandleMyNewTask)
+// ...
 ```
 
-### Step 4: Dispatch from business logic
+### Step 5: Dispatch from business logic
 
 ```go
-// internal/pool/service.go
-func (s *Service) AddStandbyDomain(ctx context.Context, projectID int64, domain string) error {
-    // ... create pool entry with status=pending ...
-
-    payload, _ := json.Marshal(tasks.PoolWarmupPayload{
-        PoolDomainID: poolDomain.ID,
-        MainDomain:   domain,
-        ProjectID:    projectID,
-    })
-
-    task := asynq.NewTask(tasks.TypePoolWarmup, payload,
-        asynq.MaxRetry(3),
-        asynq.Timeout(10*time.Minute),
-        asynq.Queue("default"),  // pool:warmup lives in `default` per ARCHITECTURE.md §2.3
-    )
-
-    _, err := s.taskClient.Enqueue(task)
-    return err
+// internal/somewhere/service.go
+payload, _ := json.Marshal(tasks.MyNewTaskPayload{TargetID: id, Reason: "user request"})
+task := asynq.NewTask(tasks.TypeMyNewTask, payload,
+    asynq.MaxRetry(3),
+    asynq.Timeout(60*time.Second),
+    asynq.Queue("default"),
+)
+if _, err := s.tasks.Enqueue(task); err != nil {
+    return fmt.Errorf("enqueue task: %w", err)
 }
 ```
 
-**Queue selection cheat-sheet** (canonical table in `ARCHITECTURE.md §2.3`):
+### Choosing a queue (per ARCHITECTURE.md §2.5 canonical layout)
 
-| Task prefix | Queue | Why |
-|---|---|---|
-| `switch:execute`, `probe:verify` | `critical` | Must preempt routine DNS/CDN work during incidents |
-| `dns:*` | `dns` | Isolate DNS API quota |
-| `cdn:*` | `cdn` | Isolate CDN API quota |
-| `svn:*`, `agent:*`, `nginx:*` | `deploy` | Serial per server (concurrency=5) |
-| `template:*`, `pool:*` | `default` | Low priority, high concurrency |
-
-Never hand-pick a different queue — the layout is load-bearing for the
-auto-switch SLA (ADR-0002 D5).
+- `critical` — auto-rollback, escalating health checks
+- `release` — release planning, shard dispatch, finalization
+- `artifact` — build, sign (CPU bound, low concurrency)
+- `lifecycle` — domain state transitions
+- `probe` — probe runs
+- `default` — notify, misc
 
 ---
 
-## 4. How to Add a Database Migration
+## 5. How to add an artifact build step
+
+The artifact build pipeline is in `internal/artifact/builder.go`. It produces
+an immutable artifact from a `(template_version, domains, variables)` tuple.
+
+### Build flow
+
+```go
+// internal/artifact/builder.go
+func (b *Builder) Build(ctx context.Context, req BuildRequest) (*Artifact, error) {
+    // 1. Load template version
+    tv, err := b.templateStore.GetVersion(ctx, req.TemplateVersionID)
+    if err != nil { return nil, fmt.Errorf("load template version: %w", err) }
+    if tv.PublishedAt == nil {
+        return nil, errors.New("template version not published")
+    }
+
+    // 2. Load domains and merged variables
+    domains, err := b.domainStore.ListByIDs(ctx, req.DomainIDs)
+    if err != nil { return nil, err }
+
+    artifactID := generateArtifactID()
+    workdir := filepath.Join(b.workdirRoot, artifactID)
+    if err := os.MkdirAll(workdir, 0o755); err != nil {
+        return nil, fmt.Errorf("mkdir workdir: %w", err)
+    }
+    defer os.RemoveAll(workdir)
+
+    manifest := &Manifest{
+        ArtifactID:        artifactID,
+        ReleaseID:         req.ReleaseID,
+        Project:           req.ProjectSlug,
+        ReleaseType:       req.ReleaseType,
+        TemplateVersionID: tv.UUID,
+        TemplateVersion:   tv.VersionLabel,
+        CreatedAt:         time.Now().UTC(),
+        CreatedBy:         req.UserID,
+    }
+
+    // 3. Render each domain — DETERMINISTIC ORDER
+    sort.Slice(domains, func(i, j int) bool { return domains[i].FQDN < domains[j].FQDN })
+    for _, d := range domains {
+        vars := mergeVariables(tv.DefaultVariables, d.Variables, b.systemVariables(d, artifactID))
+
+        if req.ReleaseType == "html" || req.ReleaseType == "full" {
+            html, err := renderTemplate(tv.ContentHTML, vars)
+            if err != nil {
+                return nil, fmt.Errorf("render html for %s: %w", d.FQDN, err)
+            }
+            path := filepath.Join(workdir, "domains", d.FQDN, "index.html")
+            if err := writeFile(path, html); err != nil { return nil, err }
+            manifest.AddDomainFile(d.FQDN, "domains/"+d.FQDN+"/index.html", html)
+        }
+
+        if req.ReleaseType == "nginx" || req.ReleaseType == "full" {
+            nginxConf, err := renderTemplate(tv.ContentNginx, vars)
+            if err != nil {
+                return nil, fmt.Errorf("render nginx for %s: %w", d.FQDN, err)
+            }
+            for _, hg := range req.HostGroups {
+                path := filepath.Join(workdir, "nginx", hg.Name, d.FQDN+".conf")
+                if err := writeFile(path, nginxConf); err != nil { return nil, err }
+                manifest.AddNginxFile(hg.Name, "nginx/"+hg.Name+"/"+d.FQDN+".conf", nginxConf)
+            }
+        }
+    }
+
+    // 4. Write checksums.txt and manifest.json
+    if err := manifest.WriteChecksums(filepath.Join(workdir, "checksums.txt")); err != nil { return nil, err }
+    if err := manifest.WriteManifest(filepath.Join(workdir, "manifest.json")); err != nil { return nil, err }
+
+    // 5. Compute artifact-level checksum
+    manifest.Checksum = computeArtifactChecksum(workdir) // sha256 of manifest.json + checksums.txt
+
+    // 6. Sign (per ADR-0004; placeholder in P1)
+    sig, err := b.signer.Sign(ctx, manifest.Checksum)
+    if err != nil { return nil, fmt.Errorf("sign: %w", err) }
+    manifest.Signature = sig
+
+    // 7. Upload to MinIO/S3
+    storageURI, err := b.storage.UploadDir(ctx, workdir,
+        fmt.Sprintf("%s/%s/", req.ProjectSlug, req.ReleaseID))
+    if err != nil { return nil, fmt.Errorf("upload: %w", err) }
+
+    // 8. Persist artifact row + mark signed_at
+    art := &Artifact{
+        ArtifactID:        artifactID,
+        ProjectID:         req.ProjectID,
+        ReleaseID:         req.ReleaseDBID,
+        TemplateVersionID: req.TemplateVersionID,
+        StorageURI:        storageURI,
+        Manifest:          manifest.ToJSON(),
+        Checksum:          manifest.Checksum,
+        Signature:         sig,
+        DomainCount:       len(domains),
+        FileCount:         manifest.FileCount(),
+        TotalSizeBytes:    manifest.TotalSize(),
+        BuiltBy:           req.UserID,
+        SignedAt:          ptr(time.Now().UTC()),
+    }
+    if err := b.store.Create(ctx, art); err != nil { return nil, err }
+
+    return art, nil
+}
+```
+
+### Reproducibility test (mandatory)
+
+```go
+// internal/artifact/builder_test.go
+func TestBuilder_Build_Deterministic(t *testing.T) {
+    b := newTestBuilder(t)
+    req := BuildRequest{ /* fixed input */ }
+
+    art1, err := b.Build(ctx, req); require.NoError(t, err)
+    art2, err := b.Build(ctx, req); require.NoError(t, err)
+
+    require.Equal(t, art1.Checksum, art2.Checksum,
+        "two builds with the same input must produce the same checksum")
+}
+```
+
+If this test fails, find the source of nondeterminism (random ID, timestamp,
+map iteration order, sleep) and remove it. Building artifacts must be a pure
+function.
+
+---
+
+## 6. How to add an agent task type
+
+### Step 1: Define the task envelope kind
+
+The wire protocol's `TaskEnvelope.Type` field is constrained:
+
+```go
+// pkg/agentprotocol/types.go
+const (
+    TaskTypeDeployHTML  = "deploy_html"
+    TaskTypeDeployNginx = "deploy_nginx"
+    TaskTypeDeployFull  = "deploy_full"
+    TaskTypeRollback    = "rollback"
+    TaskTypeVerify      = "verify"
+    // Adding a new type means changing both server and agent in the same PR.
+)
+```
+
+### Step 2: Implement on the agent side
+
+```go
+// cmd/agent/handler.go
+func (a *Agent) handleTask(ctx context.Context, env *agentprotocol.TaskEnvelope) error {
+    switch env.Type {
+    case agentprotocol.TaskTypeDeployHTML:
+        return a.handleDeployHTML(ctx, env)
+    case agentprotocol.TaskTypeDeployNginx:
+        return a.handleDeployNginx(ctx, env)
+    // ... add new case here
+    default:
+        return fmt.Errorf("unknown task type: %s", env.Type)
+    }
+}
+```
+
+**Critical** (CLAUDE.md Rule #3): the handler must use only the agent's
+whitelisted actions. No `exec.Command` other than the four hard-coded shell-out
+points (`nginx -t`, `nginx -s reload`, configured local-verify HTTP, systemd
+self-restart). PRs that touch `cmd/agent/` require Opus review.
+
+### Step 3: Implement on the control-plane side
+
+```go
+// internal/agent/dispatcher.go
+func (d *Dispatcher) DispatchTask(ctx context.Context, dt *DomainTask, agent *Agent, art *Artifact) error {
+    presignedURL, err := d.storage.Presign(ctx, art.StorageURI, 15*time.Minute)
+    if err != nil { return err }
+
+    env := agentprotocol.TaskEnvelope{
+        TaskID:      generateTaskID(),
+        ReleaseID:   dt.ReleaseUUID,
+        ArtifactID:  art.ArtifactID,
+        ArtifactURL: presignedURL,
+        ManifestSHA: art.Checksum,
+        DeployPath:  agent.DeployPath(),
+        Type:        deriveTaskType(dt.TaskType),
+        AllowReload: dt.AllowReload(),
+        TimeoutSec:  120,
+    }
+
+    payload, _ := json.Marshal(env)
+    task := &AgentTask{
+        TaskID:       env.TaskID,
+        DomainTaskID: dt.ID,
+        AgentID:      agent.ID,
+        ArtifactID:   art.ID,
+        ArtifactURL:  presignedURL,
+        Payload:      payload,
+        Status:       "pending",
+    }
+    return d.store.Create(ctx, task)
+}
+```
+
+---
+
+## 7. How to add a probe check
+
+```go
+// internal/probe/runner.go
+func (r *Runner) runL2Check(ctx context.Context, task *ProbeTask) (*ProbeResult, error) {
+    domain, err := r.domainStore.GetByID(ctx, task.DomainID)
+    if err != nil { return nil, err }
+
+    expected, err := r.artifactStore.GetByID(ctx, task.ExpectedArtifactID)
+    if err != nil { return nil, err }
+
+    url := "https://" + domain.FQDN + "/"
+    req, _ := http.NewRequestWithContext(ctx, "GET", url, nil)
+    start := time.Now()
+    resp, err := r.client.Do(req)
+    duration := time.Since(start)
+
+    result := &ProbeResult{
+        DomainID:           task.DomainID,
+        PolicyID:           task.PolicyID,
+        ProbeTaskID:        task.ID,
+        Tier:               2,
+        ResponseTimeMs:     int(duration.Milliseconds()),
+        ProbeRunner:        r.runnerID,
+        CheckedAt:          time.Now().UTC(),
+        ExpectedArtifactID: expected.ID,
+    }
+
+    if err != nil {
+        result.Status = "tcp_fail"
+        result.ErrorMessage = err.Error()
+        return result, nil
+    }
+    defer resp.Body.Close()
+
+    result.HTTPStatus = resp.StatusCode
+    body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+
+    detected := parseReleaseVersionMeta(body)
+    if detected == "" {
+        result.Status = "content_mismatch"
+        result.ErrorMessage = "release-version meta tag missing"
+        return result, nil
+    }
+    if detected != expected.ArtifactID {
+        result.Status = "content_mismatch"
+        result.ErrorMessage = fmt.Sprintf("expected %s, got %s", expected.ArtifactID, detected)
+        return result, nil
+    }
+
+    result.Status = "ok"
+    result.DetectedArtifactID = expected.ID
+    return result, nil
+}
+```
+
+The result writes to `probe_results` (TimescaleDB hypertable). The alert
+engine subscribes to status changes and dispatches notifications.
+
+---
+
+## 8. How to add a database migration
+
+### Pre-launch (Phase 1) — modify the initial migration in place
+
+Per the pre-launch exception (DATABASE_SCHEMA.md, ADR-0003 D9), Phase 1 may
+edit `migrations/000001_init.up.sql` directly. Just edit the file, then run
+`make migrate-down && make migrate-up` to recreate the DB.
+
+### Post-launch — new numbered migration
 
 ```bash
-# Create migration files
-make migrate-create name=add_ssl_expiry_to_subdomains
-# This creates:
-#   migrations/000015_add_ssl_expiry_to_subdomains.up.sql
-#   migrations/000015_add_ssl_expiry_to_subdomains.down.sql
+# Pick the next sequence number
+ls migrations/ | sort | tail -n 4
+# Create up + down files
+touch migrations/000003_add_my_table.up.sql
+touch migrations/000003_add_my_table.down.sql
 ```
 
 ```sql
--- 000015_add_ssl_expiry_to_subdomains.up.sql
-ALTER TABLE subdomains ADD COLUMN ssl_expiry TIMESTAMPTZ;
-CREATE INDEX idx_subdomains_ssl_expiry ON subdomains (ssl_expiry) WHERE ssl_expiry IS NOT NULL;
-
--- 000015_add_ssl_expiry_to_subdomains.down.sql
-DROP INDEX IF EXISTS idx_subdomains_ssl_expiry;
-ALTER TABLE subdomains DROP COLUMN IF EXISTS ssl_expiry;
+-- migrations/000003_add_my_table.up.sql
+CREATE TABLE IF NOT EXISTS my_table (
+    id         BIGSERIAL PRIMARY KEY,
+    uuid       UUID NOT NULL DEFAULT gen_random_uuid(),
+    -- ...
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    deleted_at TIMESTAMPTZ
+);
+CREATE INDEX idx_my_table_xxx ON my_table (xxx) WHERE deleted_at IS NULL;
 ```
 
-**Rules:**
-- NEVER modify existing migrations
-- ALWAYS write both up and down
-- ALWAYS use `IF NOT EXISTS` / `IF EXISTS`
-- Test down migration actually works before committing
+```sql
+-- migrations/000003_add_my_table.down.sql
+DROP TABLE IF EXISTS my_table CASCADE;
+```
+
+Rules: see CLAUDE.md §"Database Migrations" — every UP needs a DOWN, never
+modify applied migrations after launch, always include `id`/`created_at`/
+`updated_at`/`deleted_at`.
 
 ---
 
-## 5. How to Add a Vue Page
+## 9. How to add a Vue page
 
 ### Step 1: Create the view component
 
-```
-web/src/views/domains/DomainList.vue
-web/src/views/domains/DomainDetail.vue
+```vue
+<!-- web/src/views/releases/ReleaseList.vue -->
+<script setup lang="ts">
+import { ref, onMounted } from 'vue'
+import { PageHeader, AppTable, StatusTag } from '@/components'
+import { releaseApi } from '@/api/release'
+import type { ReleaseResponse } from '@/types/release'
+
+const releases = ref<ReleaseResponse[]>([])
+const loading  = ref(false)
+const total    = ref(0)
+
+const columns = [
+  { title: 'Release', key: 'release_id' },
+  { title: 'Project', key: 'project_name' },
+  { title: 'Type',    key: 'release_type' },
+  { title: 'Status',  key: 'status', render: (row: ReleaseResponse) => h(StatusTag, { status: row.status }) },
+  { title: 'Created', key: 'created_at' },
+]
+
+async function fetchReleases() {
+  loading.value = true
+  try {
+    const res = await releaseApi.list()
+    releases.value = res.items
+    total.value    = res.total
+  } finally {
+    loading.value = false
+  }
+}
+
+onMounted(fetchReleases)
+</script>
+
+<template>
+  <div class="list-page">
+    <PageHeader title="Releases" :subtitle="`共 ${total} 筆`" />
+    <AppTable :columns="columns" :data="releases" :loading="loading" />
+  </div>
+</template>
 ```
 
 ### Step 2: Add route
@@ -434,338 +864,213 @@ web/src/views/domains/DomainDetail.vue
 ```typescript
 // web/src/router/index.ts
 {
-    path: '/domains',
-    name: 'DomainList',
-    component: () => import('@/views/domains/DomainList.vue'),
-    meta: { title: 'Domains', requiresAuth: true, minRole: 'viewer' }
-},
-{
-    path: '/domains/:id',
-    name: 'DomainDetail',
-    component: () => import('@/views/domains/DomainDetail.vue'),
-    meta: { title: 'Domain Detail', requiresAuth: true, minRole: 'viewer' }
+  path: '/releases',
+  component: () => import('@/views/releases/ReleaseList.vue'),
+  meta: { requiresAuth: true },
 }
 ```
 
 ### Step 3: Add API client
 
 ```typescript
-// web/src/api/domain.ts
-export const domainApi = {
-    list: (params: DomainListParams) =>
-        http.get<PaginatedResponse<DomainResponse>>('/api/v1/domains', { params }),
-    get: (id: string) =>
-        http.get<DomainResponse>(`/api/v1/domains/${id}`),
-    create: (data: CreateDomainRequest) =>
-        http.post<DomainResponse>('/api/v1/domains', data),
+// web/src/api/release.ts
+import { http } from '@/utils/http'
+import type { ReleaseResponse, CreateReleaseRequest } from '@/types/release'
+
+export const releaseApi = {
+  list:   ()       => http.get<{ items: ReleaseResponse[]; total: number }>('/api/v1/releases'),
+  get:    (id: string) => http.get<ReleaseResponse>(`/api/v1/releases/${id}`),
+  create: (data: CreateReleaseRequest) => http.post<ReleaseResponse>('/api/v1/releases', data),
+  pause:  (id: string) => http.post(`/api/v1/releases/${id}/pause`),
+  resume: (id: string) => http.post(`/api/v1/releases/${id}/resume`),
 }
 ```
 
-### Step 4: Add Pinia store (if needed for shared state)
+### Step 4: Add TypeScript types
 
 ```typescript
-// web/src/stores/domain.ts
-export const useDomainStore = defineStore('domain', () => {
-    const domains = ref<DomainResponse[]>([])
-    const loading = ref(false)
+// web/src/types/release.ts
+export interface ReleaseResponse {
+  uuid: string
+  release_id: string
+  project_id: number
+  project_name?: string
+  release_type: 'html' | 'nginx' | 'full'
+  status: ReleaseStatus
+  created_at: string
+}
 
-    async function fetchByProject(projectId: number) {
-        loading.value = true
-        try {
-            const res = await domainApi.list({ project_id: projectId })
-            domains.value = res.data.items
-        } finally {
-            loading.value = false
-        }
-    }
-
-    return { domains, loading, fetchByProject }
-})
+export type ReleaseStatus =
+  | 'pending' | 'planning' | 'ready' | 'executing'
+  | 'paused' | 'succeeded' | 'failed'
+  | 'rolling_back' | 'rolled_back' | 'cancelled'
 ```
+
+### FRONTEND_GUIDE.md compliance
+
+Read `docs/FRONTEND_GUIDE.md` before adding any page. Use only the shared
+components (`PageHeader`, `AppTable`, `StatusTag`, `SeverityTag`, `ConfirmModal`).
+No raw `NDataTable`, no inline hex colors, no inline pixel values.
 
 ---
 
-## 5.5 How to Add a Release (canary + shard sizing)
+## 10. How to dispatch a release
 
-When building a Release row in code or in an admin form, honor the following invariants
-(enforced in the service layer, not the DB):
+The release execution flow is the most complex pipeline in the platform.
+Here's the canonical sequence (Phase 1 simplified version — Phase 2 adds
+sharding, Phase 3 adds canary + probe gating):
 
-```go
-// internal/release/service.go
-func (s *Service) NewRelease(projectID int64, total int) *Release {
-    canary := total * 2 / 100  // 2%
-    if canary > 30 { canary = 30 }
-    if canary < 10 { canary = 10 }
-    if canary > total { canary = total }
-
-    return &Release{
-        ProjectID:       projectID,
-        TotalDomains:    total,
-        ShardSize:       200,     // normal shards 200–500
-        CanaryShardSize: canary,
-        CanaryThreshold: 0.95,
-    }
-}
+```
+Operator → POST /api/v1/releases → release row in 'pending'
+                                          │
+                                          ▼ (asynq enqueue)
+                              TypeReleasePlan handler
+                                          │
+                                          │ Transition: pending → planning
+                                          │
+                              ┌───────────┼───────────┐
+                              ▼           ▼           ▼
+                       artifact build  scope expand  shard size
+                              │
+                              │ artifacts.signed_at = NOW()
+                              │ Transition: planning → ready
+                              ▼
+                       (auto or manual trigger)
+                              │
+                              ▼ (asynq enqueue)
+                       TypeReleaseDispatchShard handler
+                              │
+                              │ Transition: ready → executing
+                              │
+                              │ For each agent in shard:
+                              │   create agent_tasks row (status=pending)
+                              │   notify via Redis pubsub
+                              ▼
+                       Agents long-poll, claim, execute
+                              │
+                              │ POST /agent/v1/tasks/{id}/report
+                              ▼
+                       Update agent_tasks + domain_tasks status
+                              │
+                              ▼
+                       (when all tasks done in shard)
+                       TypeReleaseProbeVerify handler  [Phase 3]
+                              │
+                              ▼
+                       (when all shards done)
+                       TypeReleaseFinalize handler
+                              │
+                              │ Transition: executing → succeeded
+                              ▼
+                       Audit + notify
 ```
 
-- A Release is scoped to **one project**. To roll out across projects, dispatch
-  multiple Releases and coordinate in the UI, never merge them into one DB row.
-- Shard 0 is always the canary shard sized per the formula above.
-- Shards 1..N use `shard_size` (default 200). Domains are assigned by
-  `hash(main_domain_id) % shard_count` so retries land in the same shard.
-- The release scheduler MUST check `release:pause:{project_id}` before starting
-  each shard and abort cleanly if the pause flag is set.
+The Phase 1 implementation can flatten this: no sharding (all tasks in one
+shard 0), no probe gating, just dispatch → wait → finalize.
 
 ---
 
-## 6. How to Change a Domain's Status
-
-**NEVER write `UPDATE main_domains SET status` directly** — per ADR-0002 D2
-and CLAUDE.md Critical Rule #8. The only allowed entry point is
-`internal/domain.Service.Transition()`.
-
-### Caller template
-
-```go
-// From any package that needs to mutate status:
-//   internal/release/service.go
-//   internal/switcher/service.go
-//   internal/pool/service.go
-//   internal/domain/deployer.go
-//   probe-triggered auto-handlers
-
-err := s.domainSvc.Transition(ctx,
-    mainDomainID,
-    "active",        // expected current (optimistic check)
-    "degraded",      // target
-    "probe: 2 of 3 nodes report dns_poison",
-    "probe:cn-probe-ct",
-)
-if errors.Is(err, domain.ErrStatusRaceCondition) {
-    // Someone else already moved this domain; re-read state and decide
-    return nil
-}
-if errors.Is(err, domain.ErrInvalidTransition) {
-    // CanTransition(active, degraded) would normally succeed — this means
-    // the domain's actual current state differs from "active". Log and
-    // re-read.
-    s.logger.Warn("invalid transition", ...)
-    return err
-}
-if err != nil {
-    return fmt.Errorf("transition %d to degraded: %w", mainDomainID, err)
-}
-```
-
-### `triggeredBy` conventions
-
-| Origin | Format | Example |
-|---|---|---|
-| User action from UI | `"user:{uuid}"` | `"user:a3f2-..."` |
-| Release scheduler | `"release:{uuid}"` | `"release:b9c1-..."` |
-| Switcher auto-switch | `"switcher"` | `"switcher"` |
-| Probe-triggered | `"probe:{node_name}"` | `"probe:cn-probe-ct"` |
-| System maintenance | `"system"` | `"system"` |
-
-### Why not a direct store method?
-
-Because `Transition()` enforces four things in one atomic transaction that
-a store-level call cannot:
-
-1. `SELECT ... FOR UPDATE` row lock (prevents race with switcher)
-2. Optimistic `current == from` check (catches double-triggered handlers)
-3. `CanTransition()` validation (prevents illegal states)
-4. `domain_state_history` insert (guaranteed audit trail)
-
-Any shortcut that skips one of these four produces a silent correctness
-bug. The CI grep gate makes the shortcut visible at review time.
-
----
-
-## 7. How to Rebuild Subdomains After a Prefix-Rule Change
-
-Per ADR-0002 D3, `prefix_rules` runtime fields are soft-frozen after first
-use. Operators who need to change a rule's `dns_provider`, `cdn_provider`,
-`nginx_template`, or `html_template` MUST go through the rebuild flow.
-
-### Handler flow
-
-```go
-// api/handler/prefix_rule.go
-func (h *PrefixRuleHandler) Update(c *gin.Context) {
-    var req UpdatePrefixRuleRequest
-    if err := c.ShouldBindJSON(&req); err != nil {
-        c.JSON(http.StatusBadRequest, ErrorResponse(40001, err.Error()))
-        return
-    }
-
-    // Service layer detects runtime-field changes and rejects if !req.Rebuild
-    release, err := h.service.UpdateWithRebuild(c.Request.Context(), projectID, prefix, &req)
-    if errors.Is(err, project.ErrPrefixRuleDriftRequiresRebuild) {
-        c.JSON(http.StatusConflict, ErrorResponse(40902,
-            "prefix_rule edit affects existing subdomains; pass {rebuild: true} to create a rebuild release"))
-        return
-    }
-    if err != nil {
-        InternalError(c, h.logger, err)
-        return
-    }
-
-    c.JSON(http.StatusOK, SuccessResponse(release.ToResponse()))
-}
-```
-
-### Service layer
-
-```go
-// internal/project/prefix_service.go
-func (s *Service) UpdateWithRebuild(ctx context.Context, projectID int64, prefix string, req *UpdatePrefixRuleRequest) (*release.Release, error) {
-    tx, err := s.db.BeginTxx(ctx, nil)
-    if err != nil { return nil, fmt.Errorf("begin tx: %w", err) }
-    defer tx.Rollback()
-
-    // 1. Load current rule
-    current, err := s.store.GetTx(ctx, tx, projectID, prefix)
-    if err != nil { return nil, err }
-
-    // 2. Detect runtime-field change
-    runtimeChanged :=
-        current.DNSProvider   != req.DNSProvider   ||
-        current.CDNProvider   != req.CDNProvider   ||
-        current.NginxTemplate != req.NginxTemplate ||
-        current.HtmlTemplate  != req.HtmlTemplate
-
-    // 3. If runtime fields changed AND existing subdomains reference this rule:
-    //    require rebuild flag and create a rebuild release
-    if runtimeChanged {
-        affected, err := s.subStore.ListByPrefixRuleTx(ctx, tx, projectID, prefix)
-        if err != nil { return nil, err }
-
-        if len(affected) > 0 && !req.Rebuild {
-            return nil, ErrPrefixRuleDriftRequiresRebuild
-        }
-
-        // 4. Update prefix_rule and all affected subdomain snapshots atomically
-        if err := s.store.UpdateTx(ctx, tx, current.ID, req); err != nil {
-            return nil, fmt.Errorf("update prefix_rule: %w", err)
-        }
-        for _, sub := range affected {
-            if err := s.subStore.UpdateProviderSnapshotTx(ctx, tx, sub.ID, req); err != nil {
-                return nil, fmt.Errorf("update subdomain %d: %w", sub.ID, err)
-            }
-        }
-
-        // 5. Create rebuild release with all affected main_domains
-        mainDomainIDs := uniqueMainDomainIDs(affected)
-        rel := release.NewRebuildRelease(projectID, mainDomainIDs, req.Reason)
-        if err := s.releaseStore.CreateTx(ctx, tx, rel); err != nil {
-            return nil, fmt.Errorf("create rebuild release: %w", err)
-        }
-
-        if err := tx.Commit(); err != nil { return nil, err }
-
-        // 6. Enqueue the release to start (outside the tx)
-        return rel, s.releaseScheduler.Start(ctx, rel.ID)
-    }
-
-    // Purpose-only edit — no rebuild needed
-    if err := s.store.UpdateTx(ctx, tx, current.ID, req); err != nil {
-        return nil, fmt.Errorf("update prefix_rule: %w", err)
-    }
-    return nil, tx.Commit()
-}
-```
-
-### Release execution
-
-A rebuild release uses the normal `release.Service.Run()` pipeline with one
-difference: `domain_tasks.task_type = 'rebuild'` instead of `'deploy'`, and
-step 1 (DNS) and step 2 (CDN) are skipped if the provider didn't change.
-The render / svn / reload / verify steps always run.
-
-### Rollback
-
-Canary failure on a rebuild release → operator options:
-1. **Rollback**: restore old `prefix_rules` values from `conf_snapshots` via
-   `release.Service.Rollback()`. Requires a reverse-direction update of the
-   subdomain snapshots.
-2. **Roll forward**: fix the template and create a new rebuild release with
-   the corrected values.
-
----
-
-## 8. Common Patterns Reference
+## 11. Common patterns reference
 
 ### Pagination (cursor-based)
 
 ```go
-// Store layer
 type ListOpts struct {
-    Cursor  string
-    Limit   int
-    Status  string
-    OrderBy string
+    ProjectID int64
+    Cursor    string
+    Limit     int
 }
 
-func (s *DomainStore) List(ctx context.Context, projectID int64, opts ListOpts) ([]MainDomain, string, error) {
-    if opts.Limit == 0 { opts.Limit = 50 }
-    if opts.Limit > 200 { opts.Limit = 200 }
+func (s *Store) List(ctx context.Context, opts ListOpts) ([]Item, string, error) {
+    if opts.Limit == 0 || opts.Limit > 200 { opts.Limit = 50 }
 
-    var domains []MainDomain
-    q := `SELECT * FROM main_domains WHERE project_id = $1 AND deleted_at IS NULL`
-    args := []interface{}{projectID}
-
+    var afterID int64
     if opts.Cursor != "" {
-        cursorID, _ := decodeCursor(opts.Cursor)
-        q += ` AND id > $2`
-        args = append(args, cursorID)
+        afterID = decodeCursor(opts.Cursor)
     }
 
-    q += ` ORDER BY id ASC LIMIT $` + fmt.Sprintf("%d", len(args)+1)
-    args = append(args, opts.Limit+1) // fetch one extra to detect hasMore
+    const q = `
+        SELECT * FROM items
+        WHERE project_id = $1 AND id > $2 AND deleted_at IS NULL
+        ORDER BY id ASC
+        LIMIT $3`
 
-    err := s.db.SelectContext(ctx, &domains, q, args...)
-    // ... build next cursor from last item
+    var items []Item
+    if err := s.db.SelectContext(ctx, &items, q, opts.ProjectID, afterID, opts.Limit+1); err != nil {
+        return nil, "", err
+    }
+
+    nextCursor := ""
+    if len(items) > opts.Limit {
+        nextCursor = encodeCursor(items[opts.Limit-1].ID)
+        items = items[:opts.Limit]
+    }
+    return items, nextCursor, nil
 }
 ```
 
-### Audit Logging
+### Audit logging
 
 ```go
-// EVERY write operation must log an audit entry
-s.audit.Log(ctx, AuditEntry{
-    UserID:   middleware.GetUserID(ctx),
-    Action:   "domain.deployed",
-    TargetID: domain.UUID,
-    Detail:   fmt.Sprintf("release=%s shard=%d", release.UUID, shardID),
-    IP:       middleware.GetClientIP(ctx),
-})
+type AuditEntry struct {
+    UserID     int64
+    Action     string                 // "release.created", "domain.transition.requested→approved"
+    TargetKind string                 // "release", "domain", "agent"
+    TargetID   string                 // UUID
+    Detail     map[string]any
+}
+
+func (a *Auditor) LogTx(ctx context.Context, tx *sqlx.Tx, e AuditEntry) error {
+    detailJSON, _ := json.Marshal(e.Detail)
+    _, err := tx.ExecContext(ctx, `
+        INSERT INTO audit_logs (user_id, action, target_kind, target_id, detail)
+        VALUES ($1, $2, $3, $4, $5)`,
+        e.UserID, e.Action, e.TargetKind, e.TargetID, detailJSON)
+    return err
+}
 ```
 
-### Graceful Shutdown
+### Graceful shutdown
 
 ```go
 // cmd/server/main.go
-srv := &http.Server{Addr: ":8080", Handler: router}
+func main() {
+    // ... setup ...
 
-go func() {
-    if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-        logger.Fatal("server failed", zap.Error(err))
+    srv := &http.Server{Addr: ":8080", Handler: router}
+
+    go func() {
+        if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+            logger.Fatal("server failed", zap.Error(err))
+        }
+    }()
+
+    quit := make(chan os.Signal, 1)
+    signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+    <-quit
+    logger.Info("shutting down")
+
+    ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+    defer cancel()
+    if err := srv.Shutdown(ctx); err != nil {
+        logger.Error("forced shutdown", zap.Error(err))
     }
-}()
-
-quit := make(chan os.Signal, 1)
-signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
-<-quit
-
-logger.Info("shutting down server...")
-ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-defer cancel()
-srv.Shutdown(ctx)
+}
 ```
 
-### Login identifier
+### Login identifier = username
 
-- User accounts use **`username`**, not email. API payloads, Pinia stores, TypeScript
-  types, and Go DTOs MUST all name the field `username`. Do not reintroduce `email` on
-  the `users` table or in any login path. See ARCHITECTURE.md §4 and ADR-0001.
+Per ADR-0001 D1 (preserved through ADR-0003), the login identifier is
+`username`, not email. The platform is for internal operators; no email is
+collected. Password recovery is out of band (operator manual reset by an admin).
+
+```go
+// store/postgres/user.go
+const getUserByUsername = `
+    SELECT id, uuid, username, password_hash, display_name, status
+    FROM users
+    WHERE username = $1 AND deleted_at IS NULL`
+```
+
+NEVER add a `GetByEmail` method. The frontend login form uses
+`username + password`.

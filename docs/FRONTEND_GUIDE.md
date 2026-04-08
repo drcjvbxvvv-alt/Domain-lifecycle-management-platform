@@ -2,6 +2,12 @@
 
 > **Claude Code 必讀。** 每次新增或修改頁面前，先讀完本文件。
 > 本文件的目標：讓所有頁面看起來像同一個人寫的。
+>
+> **Aligned with PRD + ADR-0003 (2026-04-09).** The design system itself
+> (PageHeader, AppTable, StatusTag, ConfirmModal, tokens, spacing rules) is
+> universal and unchanged by the pivot. Only the example status names in
+> this guide were updated to reflect the new architecture's three state
+> machines (Domain Lifecycle / Release / Agent).
 
 ---
 
@@ -48,9 +54,9 @@ const activeColor = colors.status.active.color  // '#4ade80'
 <template>
   <div class="list-page">
     <!-- 1. 頁面標題列 -->
-    <PageHeader title="域名列表" :subtitle="`共 ${total} 筆`">
+    <PageHeader title="Releases" :subtitle="`共 ${total} 筆`">
       <template #actions>
-        <NButton type="primary" @click="showCreate = true">新增域名</NButton>
+        <NButton type="primary" @click="showCreate = true">新增 Release</NButton>
       </template>
     </PageHeader>
 
@@ -58,7 +64,7 @@ const activeColor = colors.status.active.color  // '#4ade80'
     <SearchBar>
       <NSelect v-model:value="filters.projectId" :options="projectOptions" placeholder="所有專案" />
       <NSelect v-model:value="filters.status"    :options="statusOptions"  placeholder="所有狀態" />
-      <NInput  v-model:value="filters.keyword"   placeholder="搜尋域名..." clearable />
+      <NInput  v-model:value="filters.keyword"   placeholder="搜尋..." clearable />
       <template #action>
         <NButton @click="resetFilters">重置</NButton>
       </template>
@@ -94,10 +100,10 @@ const activeColor = colors.status.active.color  // '#4ade80'
 <template>
   <div class="detail-page">
     <!-- 1. 標題（含返回按鈕） -->
-    <PageHeader :title="domain?.domain ?? '載入中...'" :subtitle="domain?.status">
+    <PageHeader :title="release?.release_id ?? '載入中...'" :subtitle="release?.status">
       <template #actions>
         <NButton @click="router.back()">返回</NButton>
-        <NButton type="primary" @click="handleDeploy">部署</NButton>
+        <NButton type="primary" :disabled="!canDispatch" @click="handleDispatch">執行</NButton>
       </template>
     </PageHeader>
 
@@ -108,9 +114,10 @@ const activeColor = colors.status.active.color  // '#4ade80'
       </div>
       <div class="detail-page__main">
         <NTabs>
-          <NTabPane name="subdomains" tab="子域名" />
-          <NTabPane name="history"    tab="狀態歷史" />
-          <NTabPane name="probe"      tab="探針狀態" />
+          <NTabPane name="scope"     tab="範圍 / 域名" />
+          <NTabPane name="tasks"     tab="Agent Tasks" />
+          <NTabPane name="history"   tab="狀態歷史" />
+          <NTabPane name="audit"     tab="審計紀錄" />
         </NTabs>
       </div>
     </div>
@@ -154,10 +161,10 @@ const activeColor = colors.status.active.color  // '#4ade80'
 
     <!-- 統計卡片列（永遠是 4 欄） -->
     <div class="dashboard__stats">
-      <StatCard label="正常域名"  :value="stats.active"   color="#4ade80" />
-      <StatCard label="封鎖告警"  :value="stats.blocked"  color="#ef4444" />
-      <StatCard label="切換中"    :value="stats.switching" color="#c084fc" />
-      <StatCard label="備用池剩餘" :value="stats.pool"     color="#38bdf8" />
+      <StatCard label="活躍 Releases"   :value="stats.executing" color="#fbbf24" />
+      <StatCard label="今日成功"        :value="stats.succeeded" color="#4ade80" />
+      <StatCard label="失敗 / 待處理"   :value="stats.failed"    color="#ef4444" />
+      <StatCard label="在線 Agent"      :value="stats.agentsOnline" color="#38bdf8" />
     </div>
 
     <!-- 告警列表 -->
@@ -199,17 +206,29 @@ const activeColor = colors.status.active.color  // '#4ade80'
 
 ## 元件使用規則
 
-### StatusTag — 域名狀態
+### StatusTag — 三種狀態機共用
+
+`StatusTag` 接受三種狀態機的所有狀態值：
+
+- **Domain Lifecycle**: `requested` / `approved` / `provisioned` / `active` / `disabled` / `retired`
+- **Release**: `pending` / `planning` / `ready` / `executing` / `paused` / `succeeded` / `failed` / `rolling_back` / `rolled_back` / `cancelled`
+- **Agent**: `registered` / `online` / `busy` / `idle` / `offline` / `draining` / `disabled` / `upgrading` / `error`
 
 ```vue
 <!-- ✅ 正確：永遠用 StatusTag -->
 <StatusTag status="active" />
-<StatusTag :status="domain.status" />
+<StatusTag :status="domain.lifecycle_state" />
+<StatusTag :status="release.status" />
+<StatusTag :status="agent.status" />
 
 <!-- ❌ 錯誤：自己做標籤 -->
 <NTag type="success">正常</NTag>
 <span style="color:green">active</span>
 ```
+
+> StatusTag 內部維護一張 `status → (color, label, icon)` 的對照表。新增狀態值時，
+> 需要同時更新 `web/src/styles/tokens.ts` 的 `colors.status[xxx]` 與 StatusTag.vue
+> 內的對照表。所有狀態名稱必須跟後端 Go DTO 完全一致（CLAUDE.md 規範）。
 
 ### SeverityTag — 告警嚴重度
 
@@ -234,14 +253,14 @@ const activeColor = colors.status.active.color  // '#4ade80'
 ### ConfirmModal — 危險操作確認
 
 ```vue
-<!-- ✅ 正確：所有刪除、部署、切換等不可逆操作必須用 ConfirmModal -->
+<!-- ✅ 正確：所有刪除、執行 release、rollback 等不可逆操作必須用 ConfirmModal -->
 <ConfirmModal
-  v-model:show="showDelete"
-  title="刪除域名"
-  content="此操作無法還原，確定要刪除 example.com 嗎？"
+  v-model:show="showDispatch"
+  title="執行 Release"
+  content="此操作會把 artifact 部署到所有目標 host，無法輕易取消。確定要執行嗎？"
   type="danger"
-  :loading="deleting"
-  @confirm="handleDelete"
+  :loading="dispatching"
+  @confirm="handleDispatch"
 />
 
 <!-- ❌ 錯誤：直接執行危險操作，或用 window.confirm -->
@@ -267,10 +286,10 @@ import StatusTag from '@/components/StatusTag.vue'
 
 | 用途 | 類型 | 範例 |
 |------|------|------|
-| 主要操作（新增、部署） | `type="primary"` | 新增域名 |
+| 主要操作（新增、執行 release） | `type="primary"` | 新增 Release / 執行 |
 | 次要操作（重置、返回） | 預設（不加 type） | 返回 |
-| 危險操作（刪除） | `type="error"` | 刪除 |
-| 警告操作（暫停發布） | `type="warning"` | 暫停 |
+| 危險操作（刪除、rollback） | `type="error"` | 刪除 / Rollback |
+| 警告操作（暫停 release、drain agent） | `type="warning"` | 暫停 / Drain |
 
 頁面中操作按鈕最多 3 個，超過 3 個改用下拉選單（`NDropdown`）。
 
@@ -307,17 +326,21 @@ import StatusTag from '@/components/StatusTag.vue'
 
 ## 顏色使用規範
 
-**永遠不要自己挑顏色。** 按照以下對應使用：
+**永遠不要自己挑顏色。** 按照以下對應使用（每個語意對應到三種狀態機中的多個狀態值）：
 
-| 語意 | Token | 值 |
-|------|-------|-----|
-| 正常 / 成功 | `colors.status.active.color` | `#4ade80` |
-| 警告 / 降級 | `colors.status.degraded.color` | `#fb923c` |
-| 危險 / 封鎖 | `colors.status.blocked.color` | `#ef4444` |
-| 進行中 | `colors.status.deploying.color` | `#fbbf24` |
-| 切換中 | `colors.status.switching.color` | `#c084fc` |
-| 主品牌色 | `colors.primary` | `#38bdf8` |
-| 次要文字 | `colors.textSecondary` | `#94a3b8` |
+| 語意 | Token | 值 | 對應狀態 |
+|------|-------|-----|---------|
+| 正常 / 成功 | `colors.status.success.color` | `#4ade80` | `active` / `online` / `succeeded` / `idle` |
+| 進行中 / 等待 | `colors.status.progress.color` | `#fbbf24` | `executing` / `busy` / `provisioned` / `pending` / `planning` / `ready` |
+| 暫停 / 警告 | `colors.status.warning.color` | `#fb923c` | `paused` / `draining` / `requested` / `approved` |
+| 危險 / 失敗 | `colors.status.danger.color` | `#ef4444` | `failed` / `error` / `rolling_back` / `rolled_back` / `disabled` / `offline` |
+| 終態 / 中性 | `colors.status.neutral.color` | `#94a3b8` | `retired` / `cancelled` / `registered` |
+| 升級中 | `colors.status.upgrading.color` | `#c084fc` | `upgrading` |
+| 主品牌色 | `colors.primary` | `#38bdf8` | — |
+| 次要文字 | `colors.textSecondary` | `#94a3b8` | — |
+
+> 三種狀態機共用一套色板。`StatusTag` 組件內部把每個狀態值映射到一個語意 token。
+> 新增狀態值時，需要在 StatusTag 內補上對映關係，並在這張表上對應一個 row。
 
 ---
 

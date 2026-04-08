@@ -1,739 +1,952 @@
 # PHASE1_TASKLIST.md — Phase 1 Work Order
 
-> **Audience**: Claude Code sessions implementing Phase 1 (both Sonnet and Opus).
-> **Status**: Pre-implementation alignment complete (ADR-0001, ADR-0002 merged).
-> Phase 1 may begin. This document is the single entry point — read it before
-> starting any task, and follow the dependency graph strictly.
+> **Aligned with PRD + ADR-0003 (2026-04-09).** This document is the
+> authoritative work order for Phase 1 of the Domain Lifecycle & Deployment
+> Platform. It supersedes the previous PHASE1_TASKLIST.md (commit `30280dc`,
+> 2026-04-08), which described 9 task cards for the now-superseded GFW
+> failover system.
+>
+> **Audience**: Claude Code sessions (Sonnet for most tasks, Opus for the
+> bottleneck tasks marked with `(Opus)`).
+> **Pre-requisite**: Read CLAUDE.md, then ARCHITECTURE.md §1-§3, then this
+> document. Read DATABASE_SCHEMA.md before P1.2. Read DEVELOPMENT_PLAYBOOK.md
+> before any implementation task.
 
 ---
 
 ## Phase 1 — Definition of Scope
 
-Phase 1 ships the **control plane skeleton** only. At the end of Phase 1 an
-operator can:
+Phase 1 ships **the platform skeleton end-to-end**: an operator can log in,
+create a project, register a domain, write a template, publish a version,
+build an artifact, create a release, watch an agent pull and apply it, and
+see results in the UI.
 
-1. Log in to the management console (username/password, not email).
-2. Create / edit / list **projects** and their **prefix rules**.
-3. Create / edit / list **main domains** and auto-generated **subdomains**.
-4. Observe domain **status transitions** through the state machine and its
-   audit history.
-5. See all data in the Vue 3 frontend (list views for projects and domains).
+### What "Phase 1 done" looks like (acceptance demo)
 
-Phase 1 does **NOT** touch any real infrastructure. No DNS records are
-actually created, no CDN is configured, no nginx conf is rendered, no SVN
-commit happens, no probe fires, no Telegram alert is sent. The system is
-wired end-to-end at the **API + DB + state-machine level** so that Phase 2
-can plug in executors without re-designing anything.
+```
+1. Admin logs in to /
+2. Admin creates Project "demo"
+3. Admin registers Domain "demo.example.com" → auto-approved → DNS provisioned
+   (DNS provider call optional in P1; can be stubbed) → state = active
+4. Admin creates Template "homepage" with HTML + nginx content
+5. Admin publishes TemplateVersion v1
+6. Admin creates a Host Group "edge-01" with one Agent registered to it
+7. Admin creates Release for project=demo, template_version=v1, type=html, scope=[demo.example.com]
+8. Release goes through pending → planning → ready → executing
+9. Artifact builds, uploads to MinIO, signs
+10. Agent (running on edge-01) long-polls, claims the task, downloads, verifies, writes, reports back
+11. Release finalizes to succeeded
+12. Admin views the release detail page in the SPA and sees the green status
+```
 
-### What is explicitly OUT of Phase 1
+No sharding, no canary, no probe, no rollback, no approval flow, no nginx
+diff. Those are Phase 2-4.
 
-Do **not** implement any of the following as part of Phase 1. They belong to
-Phase 2 or later. If a P1 task tempts you to start on one, stop and re-read
-this section.
+### What is OUT of Phase 1 (do not implement)
 
-| Subsystem | Path | Phase |
+Per ADR-0003 D11 and PRD §28, the following are explicitly out of Phase 1:
+
+| Subsystem | Phase | Reason |
 |---|---|---|
-| Release executor (canary, shard, rollback) | `internal/release/` (executor logic) | Phase 2 |
-| Auto-switcher (Redis + Postgres double lock, ADR-0002 D1) | `internal/switcher/` | Phase 2 |
-| Probe monitoring + scanner binary | `internal/probe/`, `cmd/scanner/` | Phase 2 |
-| Standby pool warmup / promote / block | `internal/pool/` | Phase 2 |
-| Alert deduplication + batch notify | `internal/alert/` | Phase 2 |
-| nginx conf template rendering | `pkg/template/` | Phase 2 |
-| SVN Agent client + deploy | `pkg/svnagent/` | Phase 2 |
-| Telegram / webhook notify | `pkg/notify/` | Phase 2 |
-| **Concrete** DNS/CDN vendor clients (Cloudflare, Aliyun, Tencent, …) | `pkg/provider/dns/*.go`, `pkg/provider/cdn/*.go` | Phase 2 |
-| TimescaleDB `probe_results` write path | `store/timescale/` | Phase 2 |
+| Sharding (release_shards splitting beyond shard 0) | Phase 2 | Phase 1 has flat releases (one shard, all tasks) |
+| Rollback execution | Phase 2 | Schema in place, no executor |
+| Dry-run / Diff | Phase 2 | Operator-facing safety, not foundational |
+| Per-host concurrency limits | Phase 2 | Phase 1 dispatches sequentially per agent |
+| Canary policy (95% threshold gating) | Phase 3 | Requires probes |
+| Probe L1 / L2 / L3 | Phase 3 | Requires release execution to be reliable first |
+| Alert engine + notify channels | Phase 3 | Requires probes to generate signals |
+| Agent canary upgrade | Phase 3 | Requires fleet management UI from Phase 2 |
+| Approval flow execution | Phase 4 | Phase 1 schema includes table; auto-approve in code |
+| Nginx artifact deployment as separate type | Phase 4 | Phase 1 does HTML only; nginx works but isn't gated separately |
+| HA / cross-region | Phase 4 | Single instance is fine for Phase 1 |
+| **GFW failover vertical** | **Unscheduled** | See ADR-0003 D11 |
 
-**Note on `releases` table in Phase 1**: the table exists in the initial
-migration (per `DATABASE_SCHEMA.md`), and P1.4 inserts rows into it for
-rebuild requests, but **no worker consumes them**. That is intentional — the
-release executor is Phase 2 work, and the Phase 1 stub exists so the
-soft-freeze contract in ADR-0002 D3 is enforceable from day one.
+If a Phase 1 task tempts you to start on any of the above, **stop**. The
+platform must work end-to-end first; sophistication comes after.
 
 ---
 
 ## Dependency Graph
 
 ```
-                         P1.1 (scaffold)
+                       P1.1 (scaffold + bootstrap)
                               │
                               ▼
-                         P1.2 (migrations)
+                       P1.2 (DB migrations)
                               │
-          ┌───────┬───────────┼───────────┬───────┐
-          ▼       ▼           ▼           ▼       ▼
-        P1.3    P1.7        P1.8        P1.5    P1.4
-        Auth   asynq      Providers  State M.   Project
-               worker    (interface) (Opus)     CRUD +
-                                                soft-freeze
-          │       │           │           │       │
-          └───────┴───────────┴───────────┴───────┘
-                              │
-                              ▼
-                         P1.6 (Main Domain CRUD + Subdomain)
-                          [requires P1.5 Transition()]
+            ┌───────┬─────────┼─────────┬─────────┬─────────┐
+            ▼       ▼         ▼         ▼         ▼         ▼
+          P1.3    P1.4      P1.5      P1.6      P1.10    P1.11
+          Auth    Project   Lifecycle Template  Agent     asynq
+          (5     CRUD      (Opus)    + Versions Protocol  worker
+          roles)                                (Opus)   bootstrap
+            │       │         │         │         │         │
+            └───┬───┴────┬────┴────┬────┴────┬────┴────┬────┘
+                ▼        ▼         ▼         ▼         ▼
+              P1.7  (Artifact build pipeline) (Opus on contract; Sonnet on plumbing)
                               │
                               ▼
-                         P1.9 (Frontend list views)
-                          [requires P1.3 auth + P1.6 API]
+              P1.8  (Release model + state machine)  (Opus on state machine)
+                              │
+                              ▼
+              P1.9  (cmd/agent binary + handlers)  (Opus on whitelist enforcement)
+                              │
+                              ▼
+              P1.12 (Frontend pages: project / domain / template / release / agent)
 ```
 
 ### Critical path
 
-`P1.1 → P1.2 → P1.5 → P1.6 → P1.9`
+`P1.1 → P1.2 → P1.5 (Opus) → P1.7 (Opus) → P1.8 (Opus) → P1.9 (Opus) → P1.12`
 
-**P1.5 is the bottleneck.** It is the single task assigned to Opus in this
-phase. Start P1.5 **as early as P1.2 finishes**, in parallel with
-P1.3/P1.4/P1.7/P1.8 — do not wait for the Sonnet tasks to complete. The
-earlier Opus lands `Transition()` + the race test + the `make
-check-status-writes` CI gate, the earlier P1.6 can unblock.
+There are **four Opus tasks** in Phase 1 (vs one in the old plan). They are:
+
+1. **P1.5** — Domain Lifecycle state machine + `Transition()` + race test + CI gate
+2. **P1.7** — Artifact contract (manifest format, signature scheme, immutability), reproducibility test
+3. **P1.8** — Release state machine + `TransitionRelease()` + race test + CI gate
+4. **P1.9** — Agent protocol design + agent binary safety boundary (whitelist enforcement)
+
+P1.10 (agent control-plane side) requires P1.9's wire protocol contract first
+but the actual handler implementation is mostly Sonnet.
+
+**Start the Opus tasks as early as possible** — they are the bottleneck.
+After P1.2 lands, P1.5 / P1.7 / P1.9 can begin in parallel; they touch
+disjoint packages and disjoint files.
 
 ### Parallelization rules
 
-- After P1.2 merges, **five tasks may run in parallel**: P1.3, P1.4, P1.5,
-  P1.7, P1.8. They touch disjoint packages and do not share write paths.
-- P1.6 must wait for **both P1.5 and P1.4** (it uses `Transition()` and it
-  reads `prefix_rules` for subdomain auto-generation).
-- P1.9 must wait for **P1.3 and P1.6** (login API + domain list API).
+- P1.3, P1.4, P1.5, P1.6, P1.10, P1.11 may all run after P1.2 in parallel
+- P1.7 (artifact build) requires P1.6 (templates) to define template_versions
+- P1.8 (release model) requires P1.5 (lifecycle, for "only active domains")
+  AND P1.7 (artifact, releases pin to artifacts)
+- P1.9 (agent binary) requires P1.10's wire protocol package to be defined
+  but the agent binary itself is independent
+- P1.12 (frontend) requires the API endpoints from P1.3-P1.11 to exist
 
 ---
 
 ## Task Cards
 
-Each card specifies: owner model, scope (in), scope (out), dependencies,
-deliverable artifacts, acceptance criteria, and the docs to read first.
-**Do not deviate from "scope (out)" — those items belong to Phase 2.**
+Each card specifies: **owner model**, **scope (in)**, **scope (out)**,
+**dependencies**, **deliverables**, **acceptance criteria**, and the **docs
+to read first**.
 
 ---
 
-### P1.1 — Scaffold Go repo + tooling
+### P1.1 — Scaffold Go repo + tooling + bootstrap
 
-**Owner model**: Sonnet
-**Depends on**: (none — first task)
-**Reads first**: `CLAUDE.md` §"Project Structure" and §"Go Coding Standards"; `README.md`
+**Owner**: Sonnet
+**Depends on**: nothing — first task
+**Reads first**: CLAUDE.md §"Project Structure", §"Go Coding Standards"
 
 **Scope (in)**:
-- Verify the existing directory skeleton is complete (`cmd/`, `internal/`,
-  `pkg/`, `store/`, `api/`, `migrations/`, `templates/`, `web/`, `configs/`,
-  `deploy/`). Create any missing subdirs referenced by `CLAUDE.md`.
+
+- Verify the existing directory structure is complete. Add missing dirs:
+  `internal/lifecycle/`, `internal/template/`, `internal/artifact/`,
+  `internal/release/`, `internal/agent/`, `internal/audit/`,
+  `pkg/agentprotocol/`, `pkg/storage/`, `cmd/agent/`. Remove `cmd/scanner` from
+  the default build but leave the directory + stub `main.go` in place
+  (ADR-0003 D10).
 - `cmd/server/main.go`: Gin server boot, graceful shutdown, signal handling
-  (`DEVELOPMENT_PLAYBOOK.md` §8 "Graceful Shutdown").
-- `cmd/worker/main.go`: asynq server boot (queue list will be filled in by
-  P1.7 — leave a clearly marked `// TODO(P1.7)` stub if needed).
+  (DEVELOPMENT_PLAYBOOK §11 "Graceful shutdown"). Two listeners: `:8080`
+  for `/api/v1/*` (JWT auth) and `:8443` for `/agent/v1/*` (mTLS).
+- `cmd/worker/main.go`: asynq server boot with the canonical queue layout
+  from CLAUDE.md §"asynq Queue Layout". Empty handler stubs for every task
+  type in `internal/tasks/types.go` (handlers come in later cards).
+- `cmd/agent/main.go`: minimal agent skeleton — config load, register, heartbeat
+  loop, task long-poll loop. Handler dispatch is a TODO until P1.9.
 - `cmd/migrate/main.go`: thin wrapper around
   `github.com/golang-migrate/migrate/v4` for `up`, `down`, `version`.
-- `cmd/scanner/main.go`: empty `func main() { log.Println("scanner: not implemented in Phase 1") }`. Do NOT implement probe logic.
-- Internal shared packages:
-  - `internal/bootstrap/` (or `internal/app/`): Viper config loader,
-    Zap logger factory, sqlx PostgreSQL connection pool, go-redis client,
-    asynq client factory. **One** place that constructs these singletons.
-  - `configs/config.example.yaml`: full config reference file with every
-    key documented (copy from CLAUDE.md env vars section).
-- `Makefile`: verify every target in CLAUDE.md §"Makefile Commands" works.
-  Update `make test` to run `go test ./...`. Add `make lint` wired to
-  `golangci-lint`.
-- `go.mod` / `go.sum`: ensure all dependencies referenced by CLAUDE.md are
-  present (gin, sqlx, asynq, zap, viper, jwt/v5, uuid). Run `go mod tidy`.
+- Internal shared packages (`internal/bootstrap/`):
+  - `config.go`: Viper loader for `configs/config.yaml`
+  - `logger.go`: Zap factory (production + development)
+  - `db.go`: sqlx PostgreSQL pool
+  - `redis.go`: go-redis client
+  - `asynq.go`: asynq client + server factory
+  - `storage.go`: MinIO client (NEW for the new architecture)
+- `configs/config.example.yaml`: full config reference with every key
+  documented (DB, Redis, MinIO/S3, JWT, mTLS CA paths, providers config path).
+- `Makefile`: ensure all targets in CLAUDE.md §"Makefile Commands" work.
+  Add `make agent` (cross-compile to linux/amd64). Add three CI gate targets
+  as TODO stubs (`check-lifecycle-writes`, `check-release-writes`,
+  `check-agent-writes`) — implementation in P1.5/P1.8/P1.9.
+- `go.mod`: add `github.com/minio/minio-go/v7` if missing. Run `go mod tidy`.
 - `.golangci.yml`: minimal config (govet, staticcheck, errcheck, revive).
+- `deploy/docker-compose.yml`: PostgreSQL 16 + TimescaleDB + Redis 7 + MinIO.
 
 **Scope (out)**:
-- No business logic. No handlers. No store methods. No migrations.
+
+- No business logic, no handlers, no migrations, no store methods.
 - No frontend changes.
-- Do not touch existing web/ code.
+- Do not implement state machines yet.
+- Do not implement task handlers (just register stubs that log + ack).
 
 **Deliverables**:
-- `cmd/server/main.go`, `cmd/worker/main.go`, `cmd/migrate/main.go`,
-  `cmd/scanner/main.go` all compile and run.
-- `internal/bootstrap/config.go`, `internal/bootstrap/logger.go`,
-  `internal/bootstrap/db.go`, `internal/bootstrap/redis.go`,
-  `internal/bootstrap/asynq.go`.
-- `configs/config.example.yaml`.
-- `.golangci.yml`.
-- Updated `Makefile`.
+
+- Five compilable binaries: `server`, `worker`, `agent`, `migrate`,
+  `scanner` (parked but still compiles)
+- `internal/bootstrap/*.go` files
+- Updated `Makefile`, `configs/config.example.yaml`, `deploy/docker-compose.yml`
+- `.golangci.yml`
 
 **Acceptance**:
-- `make build` succeeds, producing 4 binaries.
-- `make lint` runs clean.
-- `./bin/server` starts, binds to `:8080`, logs a structured "server started"
-  line, and exits cleanly on `SIGTERM`.
-- `./bin/worker` starts, connects to Redis, logs "worker started" (queue
-  list is allowed to be empty at this point).
-- `./bin/migrate version` runs (even if it reports "no migrations").
+
+- `make build` succeeds, producing 5 binaries
+- `make lint` runs clean
+- `./bin/server` starts, binds to `:8080` and `:8443`, logs structured
+  "server started" and exits cleanly on `SIGTERM`
+- `./bin/worker` starts, connects to Redis, prints queue config at boot
+- `./bin/agent` starts (with mock config), attempts register, logs the
+  attempt (server side returns 404 since P1.10 hasn't shipped yet — that's OK)
+- `./bin/migrate version` runs (reports "no migrations" or version 0)
+- `docker compose -f deploy/docker-compose.yml up -d` brings up
+  PG / Redis / MinIO and they are reachable from the server binary
 
 ---
 
 ### P1.2 — Phase 1 DB migrations
 
-**Owner model**: Sonnet
+**Owner**: Sonnet
 **Depends on**: P1.1
-**Reads first**: `DATABASE_SCHEMA.md` (entire file), ADR-0002 D3 (`releases.kind`), ADR-0001 D4 (pool state rename), CLAUDE.md §"Database Migrations"
+**Reads first**: DATABASE_SCHEMA.md (entire file), CLAUDE.md §"Database Migrations"
 
 **Scope (in)**:
-- Write `migrations/000001_init.up.sql` and `migrations/000001_init.down.sql`
-  containing every table defined in `DATABASE_SCHEMA.md`:
-  - `projects`, `prefix_rules`, `main_domains`, `subdomains`,
-    `main_domain_pool` (with all 6 pool states: `pending`, `warming`, `ready`,
-    `promoted`, `blocked`, `retired`), `domain_state_history`, `switch_history`,
-    `servers`, `releases` (with `kind VARCHAR(20) NOT NULL DEFAULT 'deploy'`,
-    per ADR-0002 D3), `release_shards`, `domain_tasks` (with `chk_task_type`
-    CHECK constraint), `conf_snapshots`, `alert_events`, `users`, `audit_logs`.
-  - Include all indexes specified in `DATABASE_SCHEMA.md`.
-- Write `migrations/000002_timescale.up.sql` / `.down.sql` creating the
-  `probe_results` hypertable (TimescaleDB extension + `create_hypertable`).
-  The table exists but will not be written to in Phase 1.
-- All tables follow the conventions in `DATABASE_SCHEMA.md` lines 15-21
-  (`id BIGSERIAL PRIMARY KEY`, `uuid`, timestamps, `deleted_at`, etc.).
 
-**Pre-launch exception rule**: `000001_init.up.sql` may still be edited in
-place during Phase 1 per ADR-0001 + ADR-0002. **After Phase 1 cutover this
-window closes** — do not assume you can keep doing this.
+- Write `migrations/000001_init.up.sql` with every table from
+  DATABASE_SCHEMA.md, including P2-P4 tables (creating empty tables now is
+  cheap and avoids future schema migrations during the pre-launch window):
+  - **P1**: users, roles, user_roles, projects, domains, domain_variables,
+    domain_lifecycle_history, templates, template_versions, artifacts,
+    host_groups, agents, agent_state_history, agent_heartbeats, releases,
+    release_state_history, release_scopes, release_shards, domain_tasks,
+    agent_tasks, deployment_logs, audit_logs
+  - **P2**: rollback_records
+  - **P3**: probe_policies, probe_tasks, alert_events, notification_rules,
+    agent_versions, agent_upgrade_jobs, agent_logs
+  - **P4**: approval_requests
+- Write `migrations/000001_init.down.sql` with `DROP TABLE IF EXISTS ... CASCADE`
+  for every table in reverse dependency order
+- Write `migrations/000002_timescale.up.sql` and `.down.sql` for the
+  `probe_results` hypertable with retention + compression policies
+- All tables follow the conventions in DATABASE_SCHEMA.md (id, uuid, timestamps,
+  deleted_at where applicable)
+- Seed the five roles (`viewer`, `operator`, `release_manager`, `admin`,
+  `auditor`) via a `migrations/000003_seed_roles.up.sql` migration
 
 **Scope (out)**:
-- No seed data (users are seeded by P1.3).
-- No stored procedures, no triggers.
-- Do not add tables not in `DATABASE_SCHEMA.md`.
+
+- No seed data beyond the five roles (admin user is seeded by P1.3)
+- No stored procedures, no triggers
+- Do not add tables not in DATABASE_SCHEMA.md
 
 **Deliverables**:
-- `migrations/000001_init.up.sql`
-- `migrations/000001_init.down.sql`
-- `migrations/000002_timescale.up.sql`
-- `migrations/000002_timescale.down.sql`
+
+- `migrations/000001_init.up.sql` and `.down.sql`
+- `migrations/000002_timescale.up.sql` and `.down.sql`
+- `migrations/000003_seed_roles.up.sql` and `.down.sql`
 
 **Acceptance**:
-- `make migrate` applies cleanly against an empty PostgreSQL 16 + TimescaleDB
-  database.
-- `make migrate-down` rolls back cleanly.
-- `\d releases` in psql shows the `kind` column with default `'deploy'`.
-- `\d main_domain_pool` in psql shows the `chk_pool_status` CHECK with all
-  6 states.
-- `\d domain_tasks` shows the `chk_task_type` CHECK constraint.
-- `\dt` lists every table enumerated above.
+
+- `make migrate-up` applies cleanly against an empty PostgreSQL 16 + TimescaleDB
+- `make migrate-down` rolls back cleanly all the way to empty
+- `\dt` in psql lists every table from DATABASE_SCHEMA.md
+- `\d domains` shows the `chk_domains_lifecycle_state` CHECK with all 6 states
+- `\d agents` shows the `chk_agents_status` CHECK with all 9 states
+- `\d releases` shows the `chk_releases_status` CHECK with all 10 states
+- `\d probe_results` shows it is a TimescaleDB hypertable with chunks of 1 day
+- `SELECT name FROM roles ORDER BY name` returns the five roles
 
 ---
 
-### P1.3 — Auth: login, JWT, RBAC
+### P1.3 — Auth: login, JWT, RBAC with 5 roles
 
-**Owner model**: Sonnet
-**Depends on**: P1.2 (needs `users` table)
-**Reads first**: CLAUDE.md §"API Conventions", `DEVELOPMENT_PLAYBOOK.md` §7 "Login identifier", recent commit `af8edbc` ("replace email field with username")
+**Owner**: Sonnet
+**Depends on**: P1.2 (users, roles, user_roles tables)
+**Reads first**: CLAUDE.md §"API Conventions", DEVELOPMENT_PLAYBOOK.md §"Login identifier"
 
 **Scope (in)**:
-- `store/postgres/user.go`: `GetByUsername`, `GetByID`, `Create`, `UpdatePassword`.
-  **Note**: the login identifier is `username`, NOT `email` — this was
-  deliberately changed (see `feat(login): replace email field with username
-  for internal system`). Do not reintroduce `GetByEmail`.
+
+- `store/postgres/user.go`: `GetByUsername`, `GetByID`, `Create`,
+  `UpdatePassword`. **The login identifier is `username`, not email** —
+  preserved from ADR-0001 D1 through ADR-0003. Do not introduce `GetByEmail`.
+- `store/postgres/role.go`: `GetUserRoles(userID) []string`,
+  `HasRole(userID, role) bool`, `GrantRole`, `RevokeRole` (admin only).
 - `internal/auth/`:
   - `service.go`: `Login(ctx, username, password) (tokenPair, error)`,
-    `Refresh`, password hashing with `bcrypt`.
-  - `jwt.go`: sign / verify using `golang-jwt/jwt/v5`, claims include
-    `user_id`, `username`, `role`, `exp`.
-- `api/middleware/auth.go`: Bearer token extraction, JWT verification,
-  attaches `user_id` / `role` to `gin.Context`.
-- `api/middleware/rbac.go`: role check middleware (`RequireRole("admin")`,
-  `RequireRole("operator")`). Phase 1 supports two roles: `admin`, `operator`.
+    `Refresh`, password hashing with `bcrypt`
+  - `jwt.go`: sign / verify with `golang-jwt/jwt/v5`; claims include
+    `user_id`, `username`, `roles []string`, `exp`
+- `api/middleware/auth.go`: Bearer token extraction, JWT verify, attach
+  `user_id` and `roles` to `gin.Context`
+- `api/middleware/rbac.go`: `RequireRole("operator")`, `RequireAnyRole("operator", "release_manager")`.
+  RBAC checks against the user's role set from JWT claims.
 - `api/handler/auth.go`: `POST /api/v1/auth/login`, `POST /api/v1/auth/refresh`,
-  `GET /api/v1/auth/me`.
-- A minimal seed user created via `cmd/migrate` flag `-seed-admin` OR a
-  one-shot SQL script in `deploy/seed/admin.sql`. Document which you chose
-  in the handler file header.
+  `GET /api/v1/auth/me`
+- Seed mechanism for the first admin user (one-shot SQL or `cmd/migrate -seed-admin`)
 
 **Scope (out)**:
-- No OAuth, no SSO, no email verification, no password reset flow.
-- No audit logging beyond what `audit_logs` needs (the audit write itself
-  is fine, but do not build an audit query API in P1.3).
-- No rate limiting (that's a separate middleware, defer to Phase 2 unless
-  trivial).
+
+- No OAuth, no SSO, no email reset
+- No API rate limiting (Phase 2)
+- No approval flow logic — that's Phase 4 even though the role exists
 
 **Deliverables**:
-- `store/postgres/user.go`
+
+- `store/postgres/user.go`, `store/postgres/role.go`
 - `internal/auth/service.go`, `internal/auth/jwt.go`
 - `api/middleware/auth.go`, `api/middleware/rbac.go`
 - `api/handler/auth.go`
-- Seed mechanism for the first admin user
-- Unit tests for JWT sign/verify and password hashing
+- Seed for first admin user
+- Unit tests for JWT sign/verify, password hashing, role check
 
 **Acceptance**:
-- `POST /api/v1/auth/login` with `{username, password}` returns a JWT.
-- `GET /api/v1/auth/me` with `Authorization: Bearer <token>` returns user
-  info; without a token returns 401.
+
+- `POST /api/v1/auth/login` with valid `{username, password}` returns a JWT
+- `GET /api/v1/auth/me` with the JWT returns the user including their roles
 - A handler protected by `RequireRole("admin")` returns 403 for an operator
-  token.
-- `grep -r 'GetByEmail' internal/ store/ api/` returns **zero** results.
-- `go test ./internal/auth/...` passes.
+- `grep -rn 'GetByEmail' internal/ store/ api/` returns **zero** results
+- `go test ./internal/auth/...` passes
 
 ---
 
-### P1.4 — Project CRUD + Prefix Rules soft-freeze
+### P1.4 — Project CRUD
 
-**Owner model**: Sonnet
-**Depends on**: P1.2, P1.7 (needs asynq client to enqueue rebuild release)
-**Reads first**: ADR-0002 D3 (soft-freeze), `DEVELOPMENT_PLAYBOOK.md` §5.5 and §7 (rebuild flow), CLAUDE.md Critical Rule #9
-
-**Scope (in)**:
-- `store/postgres/project.go`: CRUD for `projects` table.
-- `store/postgres/prefix_rule.go`: CRUD for `prefix_rules`, plus
-  `IsInUse(ctx, projectID, prefix) (bool, error)` — returns true if any row
-  in `subdomains` references this `(project_id, prefix)` pair.
-- `internal/project/service.go`:
-  - `Create`, `Update` (metadata-only fields safe to edit anytime),
-    `List`, `Get`, `Delete` (soft delete).
-  - `UpdatePrefixRule(ctx, projectID, prefix, req)`:
-    - Load current rule.
-    - Compare runtime fields (`dns_provider`, `cdn_provider`, `nginx_template`,
-      `html_template`). If none changed → apply the update in a normal
-      transaction and return.
-    - If any runtime field changed AND `IsInUse` returns true AND
-      `req.Rebuild != true` → return `ErrPrefixRuleDriftRequiresRebuild`.
-    - If any runtime field changed AND `req.Rebuild == true` →
-      `UpdateWithRebuild()`.
-  - `UpdateWithRebuild(ctx, projectID, prefix, req) (*Release, error)`:
-    - In **one transaction**:
-      1. Update the `prefix_rules` row.
-      2. `INSERT INTO releases (kind, project_id, prefix, reason, created_by, ...) VALUES ('rebuild', ...)` — capture the affected subdomain IDs.
-      3. Commit.
-    - **After** commit: `asynq.Enqueue(TypeReleaseRebuildPrefix, payload)` where
-      the payload carries the release ID. Register the task type in
-      `internal/tasks/types.go` but do **not** implement its handler — leave
-      a `// TODO(Phase2): release executor` stub in the worker that logs
-      and acks.
-- `api/handler/project.go`: handlers for all the above.
-- `api/handler/prefix_rule.go`: `GET /api/v1/projects/:id/prefix-rules`,
-  `POST` (create), `PATCH /api/v1/projects/:id/prefix-rules/:prefix` (the
-  soft-freeze aware path from §7). On `ErrPrefixRuleDriftRequiresRebuild`
-  return HTTP 409 with the error code `40902` and the exact message from
-  playbook §7.
-
-**Scope (out)** — this is the most important scope boundary in Phase 1:
-- **Do NOT implement the release executor.** Phase 1 only writes the
-  `releases` row and enqueues an asynq task. The handler for that task is
-  a Phase 2 deliverable.
-- **Do NOT render nginx conf, call any provider, call SVN, run any probe,
-  or mutate `main_domains.status`**. The rebuild "happens" only as a row
-  in the `releases` table plus a queued asynq task.
-- **Do NOT implement canary, shard sizing, or rollback** (DEVELOPMENT_PLAYBOOK
-  §5.5 describes these, but the execution side is Phase 2).
-- `UpdateWithRebuild` **must not call** `internal/domain.Service.Transition()`
-  — no status changes happen as part of P1.4. All it does is: write
-  prefix_rule + write releases row + enqueue task.
-
-**Deliverables**:
-- `store/postgres/project.go`, `store/postgres/prefix_rule.go`
-- `internal/project/service.go`, `internal/project/prefix_service.go`,
-  `internal/project/errors.go` (with `ErrPrefixRuleDriftRequiresRebuild`)
-- `api/handler/project.go`, `api/handler/prefix_rule.go`
-- `internal/tasks/types.go` containing `TypeReleaseRebuildPrefix` constant
-- Worker stub in `cmd/worker/main.go` that registers the task handler and
-  just logs + acks
-- Unit tests covering: runtime-field drift detection, `IsInUse` behavior,
-  409 path, rebuild happy path ending at "release row inserted + task
-  enqueued".
-
-**Acceptance**:
-- Creating / editing a project through the API works end-to-end.
-- Editing a prefix rule's `description` field (metadata) succeeds with 200.
-- Editing a prefix rule's `dns_provider` when subdomains exist **without**
-  `rebuild: true` returns 409 with code `40902`.
-- Editing the same with `rebuild: true` returns 200, inserts a `releases`
-  row with `kind='rebuild'`, and enqueues an asynq task.
-- `grep -r 'Transition' internal/project/` returns **zero** results.
-- Unit tests pass.
-
----
-
-### P1.5 — Domain state machine + `Transition()` (Opus bottleneck task)
-
-**Owner model**: **Opus** (do not hand this to Sonnet)
-**Depends on**: P1.2 (needs `main_domains` and `domain_state_history` tables)
-**Runs in parallel with**: P1.3, P1.4, P1.7, P1.8 — start as soon as P1.2 lands.
-**Reads first**: CLAUDE.md §"Domain State Machine" and Critical Rule #8,
-ADR-0002 D2, ADR-0002 E2 (CI grep gate)
+**Owner**: Sonnet
+**Depends on**: P1.2, P1.3 (user roles for ownership)
+**Reads first**: DEVELOPMENT_PLAYBOOK.md §1 "How to add a new API endpoint"
 
 **Scope (in)**:
-- `internal/domain/statemachine.go`:
-  - `var validTransitions = map[string][]string{...}` — exactly the map in
-    CLAUDE.md §"Domain State Machine". Do not add or remove edges.
-  - `func CanTransition(from, to string) bool`
-  - Sentinel errors: `ErrInvalidTransition`, `ErrStatusRaceCondition`,
-    `ErrDomainNotFound`.
-- `store/postgres/domain.go`:
-  - `func updateStatusTx(ctx, tx, id, expectedFrom, to string) error` — the
-    **only** function in the entire codebase that issues
-    `UPDATE main_domains SET status`. Unexported. Called only by
-    `Transition()`.
-  - `func insertStateHistoryTx(ctx, tx, entry DomainStateHistoryEntry) error`.
-- `internal/domain/service.go`:
-  - `func (s *Service) Transition(ctx, id int64, from, to, reason, triggeredBy string) error`:
-    1. `BeginTxx`
-    2. `SELECT status FROM main_domains WHERE id = $1 AND deleted_at IS NULL FOR UPDATE`
-    3. If not found → `ErrDomainNotFound`
-    4. If current != `from` → `ErrStatusRaceCondition`
-    5. If `!CanTransition(current, to)` → `ErrInvalidTransition`
-    6. `updateStatusTx(..., from, to)`
-    7. `insertStateHistoryTx(..., {from, to, reason, triggeredBy, at: NOW()})`
-    8. `Commit`
-  - Conventions for `triggeredBy`: `user:{uuid}`, `system`, `probe:{node}`,
-    `switcher`, `release:{uuid}`. Document these at the top of `service.go`.
-- `internal/domain/service_test.go`:
-  - Table-driven tests for every valid edge in `validTransitions`.
-  - Table-driven tests for a sample of invalid edges (must return
-    `ErrInvalidTransition`).
-  - **Race test**: two goroutines both call `Transition(id, "active",
-    "degraded", ...)` concurrently. Exactly one must succeed; the other
-    must return `ErrStatusRaceCondition`. Run this test with `go test -race`
-    and `-count=50` to shake out flakes.
-  - Test that `domain_state_history` receives exactly one row per successful
-    transition.
 
-**CI gate** (ADR-0002 E2):
-- Add a `Makefile` target `check-status-writes`:
-  ```
-  check-status-writes:
-  	@hits=$$(grep -rn 'UPDATE main_domains SET status' --include='*.go' . | \
-  		grep -v 'store/postgres/domain.go' || true); \
-  	if [ -n "$$hits" ]; then \
-  		echo "ERROR: direct status writes found outside store/postgres/domain.go:"; \
-  		echo "$$hits"; exit 1; \
-  	fi
-  ```
-- Add a GitHub Actions (or whatever CI the repo uses) step that runs
-  `make check-status-writes`. If CI is not yet configured, document the
-  command in `README.md` under a "Pre-merge checks" heading and open a
-  TODO for the CI wiring.
-- Also verify: `grep -rn 'UPDATE main_domains SET status' --include='*.go' .`
-  returns **exactly one** hit, in `store/postgres/domain.go::updateStatusTx`.
+- `store/postgres/project.go`: CRUD for `projects` table — Create, GetByID,
+  GetBySlug, List (cursor pagination), Update, SoftDelete
+- `internal/project/service.go`: Create / Get / List / Update / Delete with
+  authorization (admin can do anything; operator can read; only admin can
+  delete)
+- `api/handler/project.go`: standard REST handlers per DEVELOPMENT_PLAYBOOK §1
+- Routes registered in `api/router/router.go` under `/api/v1/projects`
 
 **Scope (out)**:
-- No caller integration yet (P1.6 wires callers). Do not modify
-  `internal/release`, `internal/switcher`, `internal/pool` in this task.
-- No business logic beyond the state machine itself.
+
+- Project membership (Phase 4 — currently project owner is sufficient)
+- Project-level settings beyond `is_prod` (Phase 4)
 
 **Deliverables**:
-- `internal/domain/statemachine.go`
-- `internal/domain/service.go` (containing `Transition()`)
-- `internal/domain/errors.go`
-- `store/postgres/domain.go` (with `updateStatusTx` + `insertStateHistoryTx`)
-- `internal/domain/service_test.go`
-- `Makefile` updated with `check-status-writes` target
-- `README.md` updated with pre-merge check instructions (or CI config)
+
+- `store/postgres/project.go`
+- `internal/project/service.go`
+- `api/handler/project.go`
+- Routes wired
+- Unit tests for service layer (happy + duplicate slug + permission)
 
 **Acceptance**:
-- `go test -race -count=50 ./internal/domain/...` passes green.
-- `make check-status-writes` passes.
-- `grep -rn 'UPDATE main_domains SET status' --include='*.go' .` shows
-  exactly one hit.
-- Test coverage on `internal/domain/statemachine.go` and the `Transition()`
-  function is ≥ 90%.
 
-**Why Opus**: this is the single write path for the most safety-critical
-state in the system. A bug here lets concurrent callers corrupt
-`main_domains.status`, bypass the state machine, or silently drop history.
-The rest of Phase 1 assumes this works correctly.
+- `POST /api/v1/projects` (as admin) creates a project, returns 201
+- `POST /api/v1/projects` with a duplicate slug returns 409
+- `POST /api/v1/projects` (as operator) returns 403
+- `GET /api/v1/projects` (as anyone with viewer+) returns paginated list
+- `DELETE /api/v1/projects/:id` (as admin) soft-deletes; further GETs return 404
 
 ---
 
-### P1.6 — Main Domain CRUD + Subdomain
+### P1.5 — Domain Lifecycle state machine + Transition() **(Opus)**
 
-**Owner model**: Sonnet
-**Depends on**: P1.5 (requires `Transition()`), P1.4 (reads `prefix_rules`)
-**Reads first**: `DEVELOPMENT_PLAYBOOK.md` §1 (API endpoint pattern), CLAUDE.md Critical Rule #1 ("prefix determines everything")
+**Owner**: **Opus** — bottleneck task
+**Depends on**: P1.2 (domains, domain_lifecycle_history tables)
+**Runs in parallel with**: P1.3, P1.4, P1.6, P1.7, P1.10, P1.11
+**Reads first**: CLAUDE.md §"Domain Lifecycle State Machine", Critical Rule #1; ADR-0003 D9; DEVELOPMENT_PLAYBOOK.md §2
 
 **Scope (in)**:
-- `store/postgres/domain.go` (extend P1.5's file): `CreateTx`, `GetByID`,
-  `GetByDomain`, `ListByProject` (cursor pagination per playbook §8
-  "Pagination"), `SoftDelete`. Do **not** add any new status-writing
-  method — status always goes through `Transition()`.
-- `store/postgres/subdomain.go`: `CreateTx`, `ListByMainDomain`, `GetByFQDN`,
-  `SoftDelete`.
-- `internal/domain/service.go` (extend P1.5's file):
-  - `Create(ctx, req *CreateDomainRequest) (*MainDomain, error)` — follows
-    `DEVELOPMENT_PLAYBOOK.md` §1 Step 2 exactly: validate, check duplicates,
-    begin tx, insert main_domain with status `inactive`, look up prefix
-    rules, insert subdomains for each requested prefix, commit, audit log.
-  - `Get`, `List`, `Delete`.
-  - **Every caller that changes status** inside this service MUST call
-    `s.Transition(...)`. In P1.6 the only such caller is `Delete` (which
-    transitions to... actually Phase 1 `Delete` is a soft-delete of the
-    row without a status change — confirm this with playbook §6 and match).
-- `api/handler/domain.go`: `POST /api/v1/domains`, `GET /api/v1/domains/:id`,
-  `GET /api/v1/domains` (list, filter by project_id), `DELETE /api/v1/domains/:id`.
-- `api/router/router.go`: wire all routes. Ensure JWT middleware is applied.
+
+- `internal/lifecycle/statemachine.go`:
+  - `validLifecycleTransitions` map exactly as defined in CLAUDE.md
+  - `CanLifecycleTransition(from, to string) bool`
+  - Sentinel errors: `ErrDomainNotFound`, `ErrInvalidLifecycleState`,
+    `ErrLifecycleRaceCondition`
+- `store/postgres/lifecycle.go`:
+  - **Unexported** `updateLifecycleStateTx(ctx, tx, id, from, to)` — the
+    ONLY function in the codebase that issues `UPDATE domains SET lifecycle_state`
+  - `insertLifecycleHistoryTx(ctx, tx, entry)` — writes audit row
+- `internal/lifecycle/service.go`:
+  - `Service.Transition(ctx, id, from, to, reason, triggeredBy)` per
+    DEVELOPMENT_PLAYBOOK.md §2 pattern, with `SELECT ... FOR UPDATE`,
+    optimistic check, validity check, state update, history insert, all
+    in one transaction
+- `internal/lifecycle/service_test.go`:
+  - Table-driven tests for every valid edge in the validity map
+  - Table-driven tests for a sample of invalid edges
+  - **Race test** with `-race -count=50`: 10 goroutines try the same valid
+    transition; exactly one wins, nine return `ErrLifecycleRaceCondition`
+  - Test that `domain_lifecycle_history` receives exactly one row per success
+
+**CI gate** (mandatory):
+
+- Implement `make check-lifecycle-writes` Makefile target as documented in
+  DEVELOPMENT_PLAYBOOK.md §2
+- Run it in CI; it must pass (exactly one hit, in `store/postgres/lifecycle.go`)
 
 **Scope (out)**:
-- No `/deploy` endpoint. Deploy is Phase 2 (needs release executor).
-- No status-mutating endpoints (`/switch`, `/suspend`, `/resume`). Status
-  transitions happen only through the state machine's internal callers in
-  Phase 2. In Phase 1 the only status a domain can reach is `inactive`
-  (newly created).
-- Do not touch DNS or CDN providers — even though P1.8 defines the
-  interfaces, P1.6 does not call them.
-- No nginx conf rendering, no SVN, no probe.
+
+- No CRUD for domains yet — that's P1.5b (or absorbed into this card)
+  - **Decision**: Absorb basic domain CRUD into P1.5 since the state
+    machine is meaningless without it. The Create handler inserts a row
+    in state `requested` directly (no `Transition()` call — that's the
+    documented exception, since there's no `nil → requested` edge).
 
 **Deliverables**:
-- `store/postgres/domain.go` (extended), `store/postgres/subdomain.go`
-- `internal/domain/service.go` (extended), `internal/domain/dto.go`
-- `api/handler/domain.go`
-- `api/router/router.go` with all P1 routes wired
-- Unit tests for `Create` (happy path + duplicate + unknown prefix) and
-  the store methods
+
+- `internal/lifecycle/statemachine.go`
+- `internal/lifecycle/service.go` (Transition + Create + List + Get)
+- `internal/lifecycle/errors.go`
+- `store/postgres/lifecycle.go`
+- `store/postgres/domain.go` (basic CRUD; inserts row in `requested` state)
+- `internal/lifecycle/service_test.go`
+- `api/handler/domain.go` (POST creates, PATCH `/transition` calls Transition)
+- `Makefile` updated with `check-lifecycle-writes` target
 
 **Acceptance**:
-- `POST /api/v1/domains` with `{domain, project_id, prefixes}` creates the
-  main domain and auto-generates subdomains based on the project's prefix
-  rules.
-- Newly created domains have status `inactive` and a corresponding row in
-  `domain_state_history` is NOT written (initial inserts don't go through
-  `Transition` — they set status directly at insert time, which is the
-  sole documented exception. Add a comment in `CreateTx` explaining why).
 
-  > Actually — re-verify this decision during P1.6. If CLAUDE.md Critical
-  > Rule #8 requires even initial inserts to go through `Transition`, then
-  > the insert must use a nil→inactive transition. The current state
-  > machine map does not include a `nil`/`""` source state. Whichever
-  > approach you pick, document it in a comment at the top of `CreateTx`
-  > and in `internal/domain/statemachine.go`, and make sure the
-  > `check-status-writes` gate still passes.
+- `go test -race -count=50 ./internal/lifecycle/...` passes
+- `make check-lifecycle-writes` returns exactly one hit
+- `POST /api/v1/domains` creates a domain in `requested` state, returns 201
+- `POST /api/v1/domains/:id/transition` with `{to: "approved", reason: "..."}`
+  succeeds when current state is `requested`
+- The same call with `{to: "active"}` returns 409 (invalid edge from `requested`)
+- `domain_lifecycle_history` shows one row per successful transition
 
-- `GET /api/v1/domains?project_id=X` returns a cursor-paginated list.
-- `grep -rn 'UPDATE main_domains SET status' --include='*.go' .` still
-  returns exactly one hit (P1.5's `updateStatusTx`).
-- `make check-status-writes` passes.
+**Why Opus**: This is the safety-critical write path for the most central
+business object. Per ADR-0003 D9, the same methodology that ADR-0002 D2
+required for the previous design is mandatory here.
 
 ---
 
-### P1.7 — asynq worker + queue config
+### P1.6 — Template + TemplateVersion CRUD
 
-**Owner model**: Sonnet
+**Owner**: Sonnet
+**Depends on**: P1.2 (templates, template_versions tables), P1.4 (project FK)
+**Reads first**: CLAUDE.md §"Domain Object Model", Critical Rule #9
+
+**Scope (in)**:
+
+- `store/postgres/template.go`: CRUD for `templates` and `template_versions`
+- `internal/template/service.go`:
+  - Template CRUD (Create, List, Get, Update, Delete)
+  - `PublishVersion(templateID, content_html, content_nginx, default_variables)`:
+    creates a new `template_versions` row, computes checksum, sets
+    `published_at = NOW()`. **Once published, the row is immutable** —
+    enforced at the store layer (UPDATE rejects when `published_at IS NOT NULL`).
+  - `GetVersion(versionID) *TemplateVersion`
+  - `ListVersions(templateID) []TemplateVersion`
+- `api/handler/template.go`: standard CRUD + `POST /:id/versions/publish`
+- Validation: HTML content must contain the literal string
+  `{{ .ReleaseVersion }}` (so probes can find the meta tag in P3) — emit
+  a warning in P1, will become a hard rule in P3
+
+**Scope (out)**:
+
+- Variable schema validation (Phase 2)
+- Template preview / dry-render (Phase 2)
+- Template diff against previous version (Phase 2)
+
+**Deliverables**:
+
+- `store/postgres/template.go`
+- `internal/template/service.go`
+- `api/handler/template.go`
+- Routes wired
+- Unit tests for `PublishVersion` (immutability test included)
+
+**Acceptance**:
+
+- `POST /api/v1/projects/:projectId/templates` creates a template
+- `POST /api/v1/templates/:id/versions/publish` creates a version, returns 201
+- A second `POST .../publish` with different content creates a new version,
+  not an update
+- `PATCH /api/v1/template-versions/:id` returns 409 Conflict on a published version
+- `GET /api/v1/templates/:id/versions` lists all versions newest-first
+
+---
+
+### P1.7 — Artifact Build Pipeline **(Opus on contract; Sonnet on plumbing)**
+
+**Owner**: **Opus** for the manifest format + signature scheme + immutability contract; **Sonnet** for the rendering loop and storage upload
+**Depends on**: P1.6 (template_versions to render), P1.5 (domains to render against)
+**Reads first**: ARCHITECTURE.md §2.4, CLAUDE.md Critical Rule #2, DEVELOPMENT_PLAYBOOK.md §5
+
+**Scope (in)**:
+
+- `pkg/agentprotocol/manifest.go` (Opus):
+  - Define the `Manifest` struct with stable JSON field names
+  - Define `WriteChecksums(path)`, `WriteManifest(path)`,
+    `Validate() error`, `ToJSON() []byte` methods
+  - Document the schema as the wire format that the agent will parse
+- `pkg/storage/storage.go` + `pkg/storage/minio.go`:
+  - `Storage` interface: `UploadDir(ctx, localDir, remotePrefix) (uri, error)`,
+    `Stat(ctx, ref) (*ObjectInfo, error)`, `Presign(ctx, ref, ttl) (url, error)`
+  - MinIO implementation
+- `internal/artifact/builder.go` (Sonnet, following Opus's contract):
+  - `Build(ctx, BuildRequest) (*Artifact, error)` per DEVELOPMENT_PLAYBOOK §5
+  - Deterministic rendering: sorted domain order, sorted variable maps,
+    no timestamps in content (only in manifest), no random IDs in content
+  - Hash → manifest → upload → mark `signed_at`
+- `internal/artifact/signer.go` (Opus):
+  - In Phase 1, a placeholder HMAC-SHA256 signer using a configured secret.
+    The real signature scheme (cosign / GPG) is deferred to ADR-0004,
+    which gets written when artifact work begins.
+- `store/postgres/artifact.go`: Create, GetByID, GetByArtifactID, ListByRelease.
+  **Update method REJECTS modifications when `signed_at IS NOT NULL`**
+  (CLAUDE.md Critical Rule #2 enforcement at the store layer).
+- `internal/artifact/builder_test.go`:
+  - **Reproducibility test**: build twice with the same input, assert
+    byte-equal manifest checksum
+  - Test that template version with `published_at IS NULL` is rejected
+- `internal/tasks/types.go`: `TypeArtifactBuild` constant
+- Worker handler: `internal/artifact/handler.go::HandleBuild` — picks up an
+  asynq task with `{release_id}`, fetches release, calls Builder, updates
+  release with the new artifact_id
+- `api/handler/artifact.go`: `GET /api/v1/artifacts/:id` (read-only;
+  artifacts are created by the release flow, not directly by users)
+
+**Scope (out)**:
+
+- No nginx artifact paths in P1 if `release_type='html'` only (P4 brings full
+  HTML+nginx separation)
+- No real signature scheme — placeholder HMAC is fine for P1
+- No artifact garbage collection (deferred indefinitely)
+
+**Deliverables**:
+
+- `pkg/agentprotocol/manifest.go`
+- `pkg/storage/storage.go`, `pkg/storage/minio.go`
+- `internal/artifact/builder.go`, `internal/artifact/signer.go`,
+  `internal/artifact/handler.go`
+- `store/postgres/artifact.go` (with immutability enforcement)
+- `internal/artifact/builder_test.go` (with reproducibility test)
+- `api/handler/artifact.go`
+- `internal/tasks/types.go::TypeArtifactBuild`
+
+**Acceptance**:
+
+- `go test ./internal/artifact/...` passes including reproducibility test
+- Calling Builder.Build with the same input twice produces the same `Manifest.Checksum`
+- An attempt to UPDATE an artifact with `signed_at IS NOT NULL` returns
+  an error from the store layer
+- An end-to-end smoke test: enqueue `TypeArtifactBuild` for a release with
+  one domain → the task succeeds → MinIO contains the artifact tree →
+  the `artifacts` row exists with `signed_at` set
+
+**Why Opus on the contract**: the manifest format and the immutability contract
+are wire / store contracts that any future change touches every agent and
+every release. Once the format ships, breaking it is expensive.
+
+---
+
+### P1.8 — Release model + state machine **(Opus on state machine)**
+
+**Owner**: **Opus** for the state machine + `TransitionRelease()`; **Sonnet** for the rest
+**Depends on**: P1.5 (domains), P1.6 (templates), P1.7 (artifacts)
+**Reads first**: CLAUDE.md §"Release State Machine", DEVELOPMENT_PLAYBOOK.md §10
+
+**Scope (in)**:
+
+- `internal/release/statemachine.go` (Opus):
+  - `validReleaseTransitions` map per CLAUDE.md
+  - `CanReleaseTransition(from, to string) bool`
+  - Sentinel errors
+- `store/postgres/release.go`:
+  - **Unexported** `updateReleaseStatusTx` — only place that issues
+    `UPDATE releases SET status`
+  - `insertReleaseStateHistoryTx`
+  - Public CRUD: Create, GetByID, ListByProject, etc.
+- `internal/release/service.go` (Opus on `TransitionRelease`, Sonnet on rest):
+  - `Service.TransitionRelease(ctx, id, from, to, reason, triggeredBy)` per
+    DEVELOPMENT_PLAYBOOK.md §2 pattern
+  - `Service.Create(ctx, req, userID) (*Release, error)` per
+    DEVELOPMENT_PLAYBOOK.md §1 — inserts release in `pending`, dispatches
+    `TypeReleasePlan` asynq task
+  - `Service.Plan(ctx, releaseID)` worker handler — `pending → planning`,
+    enumerate scope domains, validate they are `active`, dispatch
+    `TypeArtifactBuild`, on artifact ready transition `planning → ready`
+    and dispatch `TypeReleaseDispatchShard`
+  - `Service.Dispatch(ctx, releaseID)` worker handler — `ready → executing`,
+    create domain_tasks rows, create agent_tasks rows targeted at agents
+    in the host_groups in scope, mark agent_tasks `pending`, notify via Redis
+    pubsub
+  - `Service.Finalize(ctx, releaseID)` — when all agent_tasks are done,
+    transition `executing → succeeded` (or `failed` if any task failed)
+  - `Service.Pause(ctx, releaseID)`: `executing → paused`
+  - `Service.Resume(ctx, releaseID)`: `paused → executing`
+  - `Service.Cancel(ctx, releaseID)`: any earlier state → `cancelled`
+- `internal/release/service_test.go`:
+  - Table-driven for the validity map
+  - **Race test** for `TransitionRelease` (`-race -count=50`)
+- `api/handler/release.go`: standard handlers
+- `internal/tasks/types.go`: `TypeReleasePlan`, `TypeReleaseDispatchShard`,
+  `TypeReleaseFinalize`, `TypeReleaseRollback` (latter as TODO stub)
+- Worker handlers registered in `cmd/worker/main.go`
+
+**CI gate** (mandatory):
+
+- `make check-release-writes` — exactly one hit in `store/postgres/release.go`
+
+**Scope (out)**:
+
+- No actual sharding (Phase 2). In Phase 1, a "shard 0" containing all tasks
+  is created for schema completeness, but planning never creates shard 1+.
+- No canary gate (Phase 3)
+- No probe verification (Phase 3)
+- No rollback execution (Phase 2)
+
+**Deliverables**:
+
+- `internal/release/statemachine.go`, `service.go`, `errors.go`
+- `store/postgres/release.go` (with `updateReleaseStatusTx` unexported)
+- `internal/release/service_test.go`
+- `api/handler/release.go`
+- Worker handlers wired
+- `Makefile` updated with `check-release-writes`
+
+**Acceptance**:
+
+- `go test -race -count=50 ./internal/release/...` passes
+- `make check-release-writes` returns exactly one hit
+- `POST /api/v1/releases` creates a release, returns 202
+- The release moves through `pending → planning → ready → executing →
+  succeeded` end-to-end (with a fake agent that always reports success)
+- A release for a domain in `requested` state returns 400 (only `active`
+  domains are valid release targets)
+
+---
+
+### P1.9 — `cmd/agent` Pull Agent binary **(Opus on safety boundary)**
+
+**Owner**: **Opus** — the agent binary contains the most security-sensitive
+code in the platform and the whitelist must be enforced structurally
+**Depends on**: P1.10 (wire protocol), P1.7 (manifest format)
+**Reads first**: CLAUDE.md Critical Rule #3, ARCHITECTURE.md §3 (entire section)
+
+**Scope (in)**:
+
+- `cmd/agent/main.go`: configuration load (Viper from
+  `/etc/domain-platform/agent.yaml` + env), graceful shutdown
+- `cmd/agent/registration.go`: register with control plane on first start;
+  store assigned `agent_id` in local config
+- `cmd/agent/heartbeat.go`: 15-second heartbeat loop with backoff on failure
+- `cmd/agent/pull.go`: long-poll `/agent/v1/tasks`, on receiving an envelope
+  call into `handleTask()`
+- `cmd/agent/handler.go`:
+  - `handleTask(ctx, env *agentprotocol.TaskEnvelope) error` dispatches by
+    `env.Type` to specific handlers
+  - Handlers for `deploy_html`, `deploy_full`, `verify`. Each runs the
+    pipeline: download → verify checksum → verify signature → write to
+    staging → run `nginx -t` if applicable → snapshot previous → swap →
+    reload if allowed → local verify → report
+- `cmd/agent/safety.go`:
+  - Constant declarations for the four (and only four) allowed shell-out
+    points: `nginxTestBin = "/usr/sbin/nginx"`, `nginxReloadArgs = []string{"-s", "reload"}`,
+    etc.
+  - These constants are used directly; **no user input** flows into
+    `os/exec.Command`
+  - Function `verifyArtifact(...)` that runs SHA-256 checks against the
+    manifest
+- `make check-agent-safety` Makefile target:
+  - Greps `cmd/agent/` for forbidden patterns:
+    `os/exec.Command(.*[^"]\)` (variable command),
+    `plugin\\.Open`, `net/http.*\\(url\\)` where url is a variable,
+    etc.
+  - **Implementation note**: this gate is stricter than the CI grep gates
+    for state machines. It is a structural enforcement of CLAUDE.md
+    Critical Rule #3.
+
+**Scope (out)**:
+
+- No agent self-upgrade (Phase 3)
+- No drain/quarantine handling (Phase 2)
+- No agent-side metrics export (Phase 2)
+- No nginx reload aggregation buffer (Phase 2)
+
+**Deliverables**:
+
+- All files under `cmd/agent/`
+- `make check-agent-safety` Makefile target
+- `deploy/systemd/agent.service` unit file
+- `configs/agent.example.yaml`
+- Agent integration test: spin up a fake control plane (httptest) +
+  fake MinIO (httptest serving pre-built artifact) + run the agent binary
+  in a temp dir, assert files written and report sent
+
+**Acceptance**:
+
+- `make agent` cross-compiles successfully
+- `make check-agent-safety` returns no violations
+- The agent binary, run in a test environment, can complete a full
+  download-verify-write-report cycle against fake control plane + fake S3
+- No `os/exec.Command` exists in `cmd/agent/` other than the four
+  hard-coded calls (`nginx -t`, `nginx -s reload`, configured local-verify
+  HTTP curl, systemd self-restart)
+- Any PR adding `os/exec` to `cmd/agent/` requires explicit Opus review
+  (documented in PR template — to be added in P1.1)
+
+**Why Opus**: this is the binary that runs as root (or with sudo) on every
+production Nginx server. A bug here is a remote code execution waiting to
+happen. The safety boundary cannot be relaxed for convenience.
+
+---
+
+### P1.10 — Agent Management (control-plane side)
+
+**Owner**: **Opus** for `TransitionAgent()`; **Sonnet** for the rest
+**Depends on**: P1.2 (agents tables), `pkg/agentprotocol` (defined here)
+**Reads first**: ARCHITECTURE.md §2.6 + §3.4
+
+**Scope (in)**:
+
+- `pkg/agentprotocol/types.go` (defined here, used by both `cmd/agent` in
+  P1.9 and `cmd/server` here):
+  - `RegisterRequest`, `RegisterResponse`
+  - `HeartbeatRequest`, `HeartbeatResponse`
+  - `TaskEnvelope`, `TaskReport`, `PhaseReport`
+  - `VerifyConfig` (local verification config carried in tasks)
+  - All constants: task type strings, status strings
+- `internal/agent/statemachine.go` (Opus):
+  - `validAgentTransitions` map per CLAUDE.md
+  - `CanAgentTransition(from, to string) bool`
+  - Sentinel errors
+- `store/postgres/agent.go`:
+  - **Unexported** `updateAgentStatusTx`
+  - `insertAgentStateHistoryTx`
+  - CRUD: Create, GetByAgentID, ListByHostGroup, ListByStatus
+  - `UpdateLastSeen(agentID, ts)`
+- `internal/agent/service.go`:
+  - `TransitionAgent(ctx, id, from, to, reason, triggeredBy)` (Opus)
+  - `Register(ctx, req) (*Agent, error)` — Sonnet, calls `TransitionAgent`
+    to enter `registered → online`
+  - `Heartbeat(ctx, agentID, req) (*HeartbeatResponse, error)`
+  - `PullNextTask(ctx, agentID) (*TaskEnvelope, error)` — long-poll;
+    queries `agent_tasks WHERE agent_id = ? AND status = 'pending'`
+  - `ReportTask(ctx, taskID, report) error` — updates agent_tasks +
+    domain_tasks, may trigger release finalization
+- `api/middleware/mtls.go`: extract client cert, verify against platform CA,
+  resolve cert serial → agent_id, attach to context
+- `api/handler/agentprotocol.go`: handlers for `/agent/v1/*` endpoints
+- `internal/agent/health.go`: periodic offline detector (asynq task
+  `TypeAgentHealthCheck`) — every 30s scans for online agents with
+  `last_seen_at < NOW() - 90s` and transitions them to offline
+- `make check-agent-writes`: CI grep gate for `UPDATE agents SET status`
+
+**Scope (out)**:
+
+- Self-upgrade (Phase 3)
+- Drain / quarantine UI actions (Phase 2)
+- Agent log ingestion (Phase 3, schema in place)
+
+**Deliverables**:
+
+- `pkg/agentprotocol/types.go`
+- `internal/agent/{statemachine,service,health,errors}.go`
+- `store/postgres/agent.go` (with unexported writer)
+- `internal/agent/service_test.go` with race test for `TransitionAgent`
+- `api/middleware/mtls.go`
+- `api/handler/agentprotocol.go`
+- `Makefile` updated with `check-agent-writes`
+
+**Acceptance**:
+
+- `go test -race -count=50 ./internal/agent/...` passes
+- `make check-agent-writes` returns exactly one hit
+- An agent (real or test) can `POST /agent/v1/register`, get assigned an
+  `agent_id`, then heartbeat, pull a task, and report
+- An online agent that stops heartbeating is transitioned to `offline` after 90s
+
+---
+
+### P1.11 — asynq worker bootstrap
+
+**Owner**: Sonnet
 **Depends on**: P1.1 (worker skeleton)
-**Runs in parallel with**: P1.3, P1.4, P1.5, P1.8 (after P1.2)
-**Reads first**: `ARCHITECTURE.md` §2.2 (canonical queue layout, ADR-0002 D5), CLAUDE.md §"Task Queue Patterns"
+**Runs in parallel with**: P1.3-P1.10 (after P1.2)
+**Reads first**: ARCHITECTURE.md §2 task references, CLAUDE.md §"Task Queue Patterns"
 
 **Scope (in)**:
-- `internal/tasks/types.go`: task type constants. Include every `TypeXxx`
-  listed in CLAUDE.md §"Task Queue Patterns" even though most handlers are
-  Phase 2.
+
+- `internal/tasks/types.go`: declare every task type constant
+- `internal/tasks/payloads.go`: declare every payload struct
 - `cmd/worker/main.go`: finalize the worker boot with the canonical queue
-  layout from `ARCHITECTURE.md` §2.2. The queue layout is authoritative —
-  this is the **only** place `asynq.Config.Queues` may be defined, per
-  ADR-0002 D5.
-- Register a `mux.HandleFunc` for every task type in `internal/tasks/types.go`.
-  For Phase 2 task types, the handler is a `// TODO(Phase2)` stub that logs
-  the task payload at `Info` and returns `nil` (ack). This keeps the worker
-  queue drainable in dev without requiring Phase 2 code to exist.
-- `internal/bootstrap/asynq.go` (from P1.1): confirm the asynq client is
-  exposed and used by handlers that need to enqueue.
+  layout from CLAUDE.md §"asynq Queue Layout"
+- Register stub handlers for every task type. Stubs that have no real
+  implementation yet log the payload at Info and return `nil` (ack).
+  Real handlers are filled in by P1.5/P1.7/P1.8/P1.10.
+- `internal/bootstrap/asynq.go`: ensure the asynq client is exposed and
+  used by services that enqueue
 
 **Scope (out)**:
-- No real task handlers beyond the P1.4 rebuild stub.
-- No scheduler (`asynq.Scheduler` / periodic tasks) — Phase 2.
-- No dashboard wiring.
+
+- No real handler logic (those land in their respective task cards)
+- No asynq scheduler (Phase 3)
+- No asynqmon dashboard wiring
 
 **Deliverables**:
-- `internal/tasks/types.go`
-- `cmd/worker/main.go` (finalized)
-- Worker starts cleanly and processes the P1.4 rebuild task by logging it.
+
+- `internal/tasks/types.go`, `internal/tasks/payloads.go`
+- Finalized `cmd/worker/main.go`
+- Verified queue config matches ARCHITECTURE.md §2.5
 
 **Acceptance**:
-- `./bin/worker` starts, connects to Redis, prints the queue config at boot.
-- Enqueuing a `TypeReleaseRebuildPrefix` task via the P1.4 handler results
-  in a log line from the worker stub.
-- `ARCHITECTURE.md` §2.2 and `cmd/worker/main.go::asynq.Config.Queues` match
-  exactly (same queue names, same priorities).
+
+- `./bin/worker` starts, prints the queue config at boot
+- Enqueuing any task type from a service results in the worker stub logging
+  the payload
+- ARCHITECTURE.md §2.5 and `cmd/worker/main.go::asynq.Config.Queues` match
+  exactly (same queue names, same priorities, same concurrency)
 
 ---
 
-### P1.8 — DNS/CDN provider interface + registry
+### P1.12 — Frontend pages: project / domain / template / release / agent
 
-**Owner model**: Sonnet
-**Depends on**: P1.1
-**Runs in parallel with**: P1.3, P1.4, P1.5, P1.7 (after P1.2 — it doesn't
-touch DB, so technically it can start right after P1.1, but parallelizing
-with P1.2+ is fine)
-**Reads first**: CLAUDE.md §"Provider Abstraction Layer", ADR-0002 D4 (CloneConfig idempotency), `ARCHITECTURE.md` §2.2
+**Owner**: Sonnet
+**Depends on**: P1.3 (login), P1.4 (project API), P1.5 (domain API),
+P1.6 (template API), P1.8 (release API), P1.10 (agent API)
+**Reads first**: FRONTEND_GUIDE.md (entire), CLAUDE.md §"Frontend Conventions"
 
 **Scope (in)**:
-- `pkg/provider/dns/provider.go`: the `Provider` interface + `Record`
-  struct + `RecordFilter` struct exactly as defined in CLAUDE.md. Do not
-  add or remove methods.
-- `pkg/provider/dns/registry.go`: `Register(name string, factory Factory)`,
-  `GetProvider(name string) (Provider, error)`, `ListProviders() []string`.
-  Thread-safe with `sync.RWMutex`.
-- `pkg/provider/cdn/provider.go`: `Provider` interface + `DomainConfig`,
-  `DomainStatus` structs exactly as defined in CLAUDE.md.
-- `pkg/provider/cdn/registry.go`: same pattern as DNS registry.
-- `pkg/provider/cdn/contract_test.go`: **contract test helper**
-  `TestCloneConfig_Idempotent(t *testing.T, p cdn.Provider)` that any
-  concrete provider can invoke. Per ADR-0002 D4, it must verify:
-  1. Calling `CloneConfig(src, dst)` when `dst` does not exist → success,
-     `dst` now mirrors `src`.
-  2. Calling `CloneConfig(src, dst)` again when `dst` already exists and
-     matches `src` → success, no change.
-  3. Calling `CloneConfig(src, dst)` when `dst` exists but differs from
-     `src` → either (a) reconciles to match `src`, or (b) returns a
-     specific `ErrCloneConflict`. Document which behavior is required.
-  The helper requires a `cdn.Provider` implementation, so Phase 1 cannot
-  run it green against a real provider. Write it against a
-  `fakeCDNProvider` defined in the same file so CI proves the helper
-  itself compiles and passes.
-- `pkg/provider/dns/contract_test.go`: a much smaller helper
-  `TestCreateRecord_RoundTrip(t, p)` that exercises create → list → delete.
-  Same "fake provider" approach.
+
+- Login wired to `POST /api/v1/auth/login` → store JWT in Pinia + localStorage
+  → redirect to `/projects`
+- Auth interceptor (`web/src/utils/http.ts`): attaches `Authorization: Bearer`,
+  redirects to `/login` on 401
+- Pinia stores: `auth.ts`, `project.ts`, `domain.ts`, `template.ts`,
+  `release.ts`, `agent.ts`
+- Pages (each with list view):
+  - `/projects` — Project list, click to detail
+  - `/projects/:id` — Project detail (read-only); shows domains, templates,
+    recent releases
+  - `/projects/:id/domains` — Domain list with state filter
+  - `/projects/:id/templates` — Template list; click to view versions
+  - `/projects/:id/templates/:tid` — Template detail showing all versions
+  - `/projects/:id/releases` — Release list with status filter
+  - `/projects/:id/releases/:rid` — Release detail showing scope, agent_tasks
+    progress, audit timeline
+  - `/agents` — Global agent list with status filter
+  - `/agents/:id` — Agent detail showing recent heartbeats and recent tasks
+- StatusTag component: extend to support all new state values:
+  - Domain lifecycle: requested / approved / provisioned / active / disabled / retired
+  - Release status: pending / planning / ready / executing / paused / succeeded
+    / failed / rolling_back / rolled_back / cancelled
+  - Agent status: registered / online / busy / idle / offline / draining /
+    disabled / upgrading / error
+  - Color tokens defined in `web/src/styles/tokens.ts` per FRONTEND_GUIDE.md
+- Router updates with auth guards
+- Layout / nav menu with the 4 main sections (Projects, Releases, Agents,
+  Audit) and admin-only items behind role gates
 
 **Scope (out)**:
-- **No concrete providers** (cloudflare.go, aliyun.go, tencent.go, etc.).
-  Those are Phase 2. Even if CLAUDE.md shows provider examples, Phase 1
-  ships only the interface + registry + contract tests + fake.
-- No real API calls, no credential handling, no retry logic beyond what
-  `context.Context` provides.
-- No `internal/` code calls `dns.GetProvider` in Phase 1 — subdomains are
-  created but not deployed.
+
+- Create / edit modals for everything (Phase 2 — Phase 1 is read-only +
+  the create path uses curl/postman)
+- Approval flow UI (Phase 4)
+- Release create wizard (Phase 2)
+- Agent drain/disable controls (Phase 2)
+- Real-time updates (no WebSocket; polling on detail pages every 5s is fine)
 
 **Deliverables**:
-- `pkg/provider/dns/provider.go`, `pkg/provider/dns/registry.go`,
-  `pkg/provider/dns/contract_test.go` (with fake provider)
-- `pkg/provider/cdn/provider.go`, `pkg/provider/cdn/registry.go`,
-  `pkg/provider/cdn/contract_test.go` (with fake provider +
-  `TestCloneConfig_Idempotent` helper)
+
+- All `web/src/views/**` pages listed above
+- All `web/src/api/*.ts` and `web/src/types/*.ts` files
+- Updated Pinia stores
+- Router and layout updates
+- StatusTag color tokens for new states
 
 **Acceptance**:
-- `go build ./pkg/provider/...` succeeds.
-- `go test ./pkg/provider/...` passes — the contract test helpers run
-  against the in-file fake provider.
-- The interface method signatures match CLAUDE.md exactly
-  (byte-for-byte).
-- `ListProviders()` returns an empty slice in Phase 1 (no concrete
-  providers registered).
 
----
-
-### P1.9 — Frontend: login + project/domain list views
-
-**Owner model**: Sonnet
-**Depends on**: P1.3 (login API), P1.6 (domain/project APIs)
-**Reads first**: `docs/FRONTEND_GUIDE.md`, CLAUDE.md §"Frontend Conventions", existing `web/src/` code (especially the completed login page)
-
-**Scope (in)**:
-- Login flow integration:
-  - Wire the existing login page to `POST /api/v1/auth/login`.
-  - Store JWT in Pinia auth store + localStorage.
-  - Set up an axios/fetch interceptor that attaches `Authorization: Bearer`
-    to every request and redirects to `/login` on 401.
-- Project list view:
-  - `web/src/views/projects/ProjectList.vue`
-  - `web/src/api/project.ts`
-  - `web/src/types/project.ts` (mirror Go DTOs)
-  - Naive UI `NDataTable` with columns: name, slug, description,
-    created_at, actions.
-- Project detail view (read-only for P1.9, no edit modal):
-  - `web/src/views/projects/ProjectDetail.vue` showing project metadata
-    and its prefix rules.
-- Main domain list view:
-  - `web/src/views/domains/DomainList.vue`
-  - `web/src/api/domain.ts`
-  - `web/src/types/domain.ts`
-  - Filter by project. Show domain, status badge, subdomain count,
-    created_at.
-- Router + nav:
-  - Update `web/src/router/index.ts` with routes for `/projects`,
-    `/projects/:id`, `/domains`.
-  - Update the main layout nav to include these pages.
-  - Guard routes with the auth store.
-- Reuse the existing light theme + brand components committed in
-  `59fa29e` and `778892f`. Do **not** introduce a new design system.
-
-**Scope (out)**:
-- No create/edit modals for domains or prefix rules (Phase 2 or separate
-  P1.9.x if needed).
-- No status-transition UI (no "deploy", "suspend", "switch" buttons) —
-  those backend endpoints don't exist in Phase 1.
-- No real-time updates (no WebSocket, no polling).
-- No i18n infrastructure beyond what's already scaffolded.
-
-**Deliverables**:
-- `web/src/views/projects/ProjectList.vue`, `ProjectDetail.vue`
-- `web/src/views/domains/DomainList.vue`
-- `web/src/api/project.ts`, `web/src/api/domain.ts`
-- `web/src/types/project.ts`, `web/src/types/domain.ts`
-- `web/src/stores/auth.ts` (finalize), `web/src/stores/project.ts`,
-  `web/src/stores/domain.ts`
-- `web/src/utils/http.ts` with auth interceptor
-- Router updates
-
-**Acceptance**:
-- `npm run build` in `web/` succeeds without warnings.
-- Manual smoke test: log in, land on `/projects`, see the list, click a
-  project, see its detail page, navigate to `/domains`, see the list.
-- 401 from the API redirects back to `/login`.
-- No console errors in the browser.
-- TypeScript types match the Go DTOs returned by P1.3 and P1.6
-  byte-for-byte.
+- `npm run build` in `web/` succeeds without warnings
+- Manual smoke: log in → land on `/projects` → click into a project → see
+  domains, templates, releases tabs → click an active release → see its
+  shard / task list → click into agents → see the agent that processed it
+- 401 from any API call redirects back to `/login`
+- TypeScript types match Go DTOs byte-for-byte
 
 ---
 
 ## Cross-cutting reminders
 
-1. **CLAUDE.md rules are load-bearing.** Re-read them before any task, not
-   just the first one. Critical Rule #8 (single status write path) and
-   Critical Rule #9 (prefix_rules soft-freeze) in particular.
+1. **CLAUDE.md Critical Business Rules are load-bearing.** Re-read them
+   before any task. Rule #1 (single state machine write paths), Rule #2
+   (artifact immutability), Rule #3 (agent whitelist) in particular.
 
-2. **Pre-launch migration exception.** `migrations/000001_init.up.sql` can
-   be edited in place during Phase 1. After cutover, never again.
+2. **Pre-launch migration exception is in effect.** During Phase 1 you may
+   edit `migrations/000001_init.up.sql` in place. After Phase 1 cutover this
+   window closes permanently.
 
-3. **One write path for `main_domains.status`.** The CI gate
-   (`make check-status-writes`) must stay green after every task. Any PR
-   that breaks it must be fixed, not merged with an exception.
+3. **Three CI gates must stay green at all times**:
+   ```
+   make check-lifecycle-writes
+   make check-release-writes
+   make check-agent-writes
+   make check-agent-safety        # additional structural gate for cmd/agent/
+   ```
+   Any PR that breaks any of these must be fixed, never bypassed.
 
-4. **Phase 1 never touches real infrastructure.** If a task tempts you to
-   call a provider API, render a template, commit to SVN, run a probe, or
-   send a notification — STOP. That's Phase 2. Enqueue a task type with a
-   stub handler instead.
+4. **Phase 1 builds the skeleton end-to-end. Phase 1 does NOT touch real
+   production infrastructure unless you point it at your own dev MinIO and
+   your own dev Nginx VM.** No real DNS provider calls in CI; mock them.
 
-5. **Log levels**: use `Info` for normal ops, `Warn` for recoverable issues,
-   `Error` for failures needing attention. No `fmt.Println` in production
-   code.
+5. **Log levels**: Info for normal ops, Warn for recoverable, Error for
+   needs attention. No `fmt.Println` in production code.
 
-6. **Every API response follows the envelope** from CLAUDE.md §"Response
-   Format" — `{code, data, message}`. No ad-hoc response shapes.
+6. **Every API response uses the envelope** from CLAUDE.md §"Response Format".
 
-7. **Every multi-table write uses a transaction** (`BeginTxx` + defer
-   `Rollback` + explicit `Commit`).
+7. **Multi-table writes use transactions** (`BeginTxx` + defer `Rollback` +
+   explicit `Commit`).
 
-8. **Every external call has a context timeout.** 5s for DB, 30s for
-   provider (not used in P1), 120s for SVN (not used in P1), 3s for probe
-   (not used in P1).
+8. **All external calls have context timeouts** per CLAUDE.md §"Context & Timeouts".
+
+9. **Deterministic artifact builds.** No timestamps in content, no random
+   IDs in content, sorted variable iteration. The reproducibility test in
+   `internal/artifact/builder_test.go` is mandatory.
+
+10. **Agent binary safety is structural, not configurational.** The
+    whitelist is enforced by the absence of certain code paths, not by
+    config flags. Any PR touching `cmd/agent/` requires Opus review.
 
 ---
 
 ## When Phase 1 is "done"
 
-All nine cards are merged to `main`, and the following command output is
-clean:
+All twelve cards are merged to `main`, and the following commands all return
+clean output:
 
 ```bash
-make build            # all 4 binaries compile
-make lint             # golangci-lint + eslint clean
-make test             # go test ./... green
-make check-status-writes   # exactly one status write site
-cd web && npm run build    # frontend builds
-cd web && npm run lint     # frontend lints
+make build                      # five binaries compile
+make agent                      # agent cross-compiles for linux/amd64
+make lint                       # golangci-lint + eslint clean
+make test                       # go test ./... -race -timeout 60s green
+make check-lifecycle-writes     # exactly one hit
+make check-release-writes       # exactly one hit
+make check-agent-writes         # exactly one hit
+make check-agent-safety         # zero violations in cmd/agent/
+cd web && npm run build         # frontend builds clean
+cd web && npm run lint
 ```
 
-Plus the manual smoke test in P1.9's acceptance criteria passes.
+Plus the manual end-to-end smoke test described in §"What 'Phase 1 done'
+looks like".
 
-At that point, the project has a running control plane — operators can log
-in, define projects with prefix rules, register domains, see them in the
-UI, and the state machine is ready to accept transitions from Phase 2's
-executors. The architecture is locked; Phase 2 plugs executors into
-well-defined seams without re-touching core contracts.
+At that point the platform has a runnable control plane: log in, define
+projects + domains + templates, build artifacts, create releases, watch
+agents pull and apply, see results. The architecture is locked along the
+contracts that Phase 2-4 plug into without re-touching core. Phase 5+ adds
+GFW failover as a vertical (separate ADR).
 
 ---
 
 ## References
 
-- `CLAUDE.md` — coding standards, critical rules, state machine, project layout
-- `docs/ARCHITECTURE.md` — subsystem responsibilities, queue layout (§2.2)
+- `CLAUDE.md` — coding standards, critical rules, state machines, project layout
+- `docs/ARCHITECTURE.md` — subsystem responsibilities, agent protocol, queue layout
 - `docs/DATABASE_SCHEMA.md` — every table, every constraint
-- `docs/DEVELOPMENT_PLAYBOOK.md` — how to add endpoints / providers / tasks / pages
-- `docs/FRONTEND_GUIDE.md` — frontend conventions
-- `docs/CLAUDE_CODE_INSTRUCTIONS.md` — Claude Code session protocol
-- `docs/adr/0001-architecture-revision-2026-04.md` — parent architecture ADR
-- `docs/adr/0002-pre-implementation-adjustments-2026-04.md` — D1–D6, E1–E3
+- `docs/DEVELOPMENT_PLAYBOOK.md` — how to add endpoints / providers / tasks /
+  artifact steps / state transitions / pages
+- `docs/FRONTEND_GUIDE.md` — frontend conventions (status tokens, table component, etc.)
+- `docs/CLAUDE_CODE_INSTRUCTIONS.md` — Claude Code session protocol + Model Selection Policy
+- `docs/adr/0003-pivot-to-generic-release-platform-2026-04.md` — pivot rationale, scope decisions
+- `docs/adr/0001-...md` and `docs/adr/0002-...md` — superseded; historical only
+- **PRD**: `/Users/ahern/Documents/AI-tools/Domain Lifecycle & Deployment Platform（域名生命週期與發布運維平台）.md`
