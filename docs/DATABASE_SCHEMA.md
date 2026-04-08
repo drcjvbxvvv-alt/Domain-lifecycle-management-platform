@@ -112,11 +112,14 @@ CREATE TABLE main_domain_pool (
     domain      VARCHAR(253) NOT NULL,
     status      VARCHAR(20) NOT NULL DEFAULT 'pending',
     priority    INT NOT NULL DEFAULT 0,
+    warmup_attempts INT NOT NULL DEFAULT 0,
+    warmup_last_error TEXT,
     created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     CONSTRAINT uq_pool_domain UNIQUE (domain),
+    -- Status names are deliberately distinct from main_domains.status (see ARCHITECTURE.md §2.6)
     CONSTRAINT chk_pool_status CHECK (
-        status IN ('pending','standby','active','blocked','retired')
+        status IN ('pending','warming','ready','promoted','blocked','retired')
     )
 );
 
@@ -184,6 +187,7 @@ CREATE TABLE releases (
     status          VARCHAR(20) NOT NULL DEFAULT 'pending',
     total_domains   INT NOT NULL DEFAULT 0,
     shard_size      INT NOT NULL DEFAULT 200,
+    canary_shard_size INT NOT NULL DEFAULT 30,   -- see ARCHITECTURE.md §2.3: min(30, 2%), hard min 10
     canary_threshold FLOAT NOT NULL DEFAULT 0.95,
     created_by      BIGINT,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -275,10 +279,12 @@ CREATE INDEX idx_alerts_domain ON alert_events (domain, created_at DESC);
 -- ============================================================
 -- USERS
 -- ============================================================
+-- Internal operator console: login identifier is `username`, NOT email.
+-- See ARCHITECTURE.md §4 Management Console.
 CREATE TABLE users (
     id          BIGSERIAL PRIMARY KEY,
     uuid        UUID NOT NULL DEFAULT gen_random_uuid(),
-    email       VARCHAR(200) NOT NULL,
+    username    VARCHAR(64) NOT NULL,
     password_hash VARCHAR(200) NOT NULL,
     display_name VARCHAR(100),
     role        VARCHAR(30) NOT NULL DEFAULT 'viewer',
@@ -286,7 +292,8 @@ CREATE TABLE users (
     created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     deleted_at  TIMESTAMPTZ,
-    CONSTRAINT uq_users_email UNIQUE (email),
+    CONSTRAINT uq_users_username UNIQUE (username),
+    CONSTRAINT chk_users_username CHECK (username ~ '^[a-zA-Z0-9_.-]{3,64}$'),
     CONSTRAINT chk_users_role CHECK (
         role IN ('viewer','operator','release_manager','admin','auditor')
     )
@@ -313,23 +320,32 @@ CREATE INDEX idx_audit_logs_target ON audit_logs (target_type, target_id);
 -- ============================================================
 -- PROBE RESULTS (TimescaleDB hypertable)
 -- ============================================================
+-- See ARCHITECTURE.md §2.4 / §3 for tier semantics and block detection logic.
 CREATE TABLE probe_results (
-    probe_node      VARCHAR(32) NOT NULL,
-    isp             VARCHAR(16) NOT NULL,
-    domain          VARCHAR(253) NOT NULL,
-    status          VARCHAR(16) NOT NULL,
-    dns_ok          BOOLEAN NOT NULL DEFAULT FALSE,
-    dns_ips         TEXT[],
-    tcp_latency_ms  FLOAT,
-    http_code       SMALLINT,
-    http_hijacked   BOOLEAN DEFAULT FALSE,
-    checked_at      TIMESTAMPTZ NOT NULL
+    probe_node       VARCHAR(32)  NOT NULL,
+    isp              VARCHAR(16)  NOT NULL,
+    domain           VARCHAR(253) NOT NULL,
+    tier             SMALLINT     NOT NULL,        -- 1=L1, 2=L2, 3=L3
+    status           VARCHAR(16)  NOT NULL,        -- ok/dns_poison/tcp_block/sni_block/http_hijack/content_tamper/timeout
+    block_reason     VARCHAR(64),                  -- NULL when status='ok'
+    dns_ok           BOOLEAN      NOT NULL DEFAULT FALSE,
+    dns_ips          TEXT[],
+    tcp_latency_ms   FLOAT,
+    tls_handshake_ok BOOLEAN,                      -- L2+ only
+    tls_sni_ok       BOOLEAN,                      -- L2+ only
+    tls_cert_expiry  TIMESTAMPTZ,                  -- L3 only
+    http_code        SMALLINT,
+    http_hijacked    BOOLEAN DEFAULT FALSE,
+    content_hash     BYTEA,                        -- L3 only, for content_tamper detection
+    checked_at       TIMESTAMPTZ  NOT NULL,
+    CONSTRAINT chk_probe_tier CHECK (tier IN (1,2,3))
 );
 
 SELECT create_hypertable('probe_results', 'checked_at');
 
 CREATE INDEX idx_probe_results_domain ON probe_results (domain, checked_at DESC);
 CREATE INDEX idx_probe_results_status ON probe_results (status, checked_at DESC);
+CREATE INDEX idx_probe_results_tier ON probe_results (tier, checked_at DESC);
 
 SELECT add_retention_policy('probe_results', INTERVAL '90 days');
 ```

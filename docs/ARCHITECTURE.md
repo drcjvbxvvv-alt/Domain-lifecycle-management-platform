@@ -9,8 +9,8 @@
 
 The platform manages 12,000+ domains across 10 projects. It automates:
 - Domain onboarding (DNS + CDN + nginx conf + deployment + verification)
-- Continuous reachability monitoring from 6 CN probe nodes
-- Automated failover when GFW blocks a domain (<5 min recovery)
+- Continuous reachability monitoring from CN probe nodes (Phase 1: 3 nodes, one per ISP; Phase 2: 6 nodes, two per ISP with north/south coverage)
+- Automated failover when GFW blocks a domain — SLA: **detection < 2 min, failover < 5 min**
 - Batch releases with canary/rollback capabilities
 - Standby domain pool management with pre-warming
 
@@ -48,6 +48,11 @@ Project-level ALWAYS wins.
 - Retry with exponential backoff per provider
 - Provider-specific quirks handled INSIDE the implementation, NEVER leaked to business logic
 
+**Rule — DNS record TTL:** All CNAME / A records created by the platform default to
+**TTL = 60s**. This is a hard requirement for the auto-switch SLA in §2.5; providers that
+do not support 60s TTL (e.g. some free-tier plans) must be flagged in their adapter and
+rejected at provider registration time.
+
 **Provider implementation priority:**
 - P0: Cloudflare (DNS+CDN), Alibaba Cloud (DNS+CDN)
 - P1: Tencent Cloud (DNS+CDN), GoDaddy (DNS)
@@ -63,15 +68,38 @@ Release
             └── ServerTask (one per target machine: svn up → nginx reload)
 ```
 
+**Shard partitioning rules:**
+- A Release is always scoped to **one project** (never cross-project). Large cross-project
+  operations must be dispatched as multiple independent Releases.
+- Within a project, domains are partitioned by `hash(main_domain_id) % shard_count` so that
+  retries of the same domain always land in the same shard.
+- Shard size: normal shards 200–500 domains. The **first (canary) shard** is always the
+  smaller of `30 domains` or `2% of the release`, with a hard minimum of 10. Rationale:
+  a blast radius of ≤ 30 domains is small enough that a template regression caught at
+  canary costs at most one manual rollback cycle, while still being statistically
+  meaningful for the 95% probe-verification threshold.
+
 **Canary strategy:**
-- Deploy Shard 1 → wait for probe verification → success rate ≥ 95% → continue
+- Deploy canary shard → wait for probe verification → success rate ≥ 95% → continue
 - Success rate < 95% → auto-pause Release, alert operators
 - Any shard can be paused/resumed/rolled back independently
 
 **nginx reload aggregation:**
 - Same server, multiple conf changes → buffer 30 seconds OR 50 domains, then single reload
 - Emergency (P1 alert failover) → skip buffer, immediate reload
-- ALWAYS run `nginx -t` before reload. Fail → rollback ALL conf changes for this batch.
+- ALWAYS run `nginx -t` before reload.
+
+**Reload failure handling (explicit):**
+- `nginx -t` fails on a server → roll back *only that server's* batch (restore previous
+  conf files from snapshot, no reload issued), mark every DomainTask in that server's batch
+  as `failed` with reason `nginx_test_failed`.
+- The enclosing Release shard is **not** globally aborted; other servers in the same shard
+  continue independently. However, if > 20% of servers in a shard fail `nginx -t`, the
+  whole shard is paused and escalated to P1 alert.
+- DomainTasks marked `failed` do **not** auto-retry via asynq. They return to `deploying`
+  only via an explicit operator re-queue, because a template error will just fail again.
+- Every reload batch MUST snapshot the full previous conf to DB before writing new conf,
+  per CLAUDE.md Critical Rule #6.
 
 ### 2.4 Probe Monitoring (internal/probe, cmd/scanner)
 
@@ -79,9 +107,25 @@ Release
 
 | Tier | Target | Checks | Frequency | Concurrency |
 |------|--------|--------|-----------|-------------|
-| L1 | All 12K main domains | DNS + TCP :443 | Every 90s | 500 goroutines |
+| L1 | All 12K main domains | DNS + TCP :443 | Every 60s | 500 goroutines |
 | L2 | L1-passed domains, sample 1-2 subdomains | HTTP 200 + latency | Every 5min | 200 goroutines |
-| L3 | Manually tagged core domains | HTTP + keyword + TLS expiry | Every 30s | 50 goroutines |
+| L3 | Manually tagged core domains | HTTP + keyword + TLS handshake + cert expiry | Every 30s | 50 goroutines |
+
+**Detection & SLA math (L1):**
+- Cycle = 60s. Two trigger paths:
+  - **Fast path**: a single cycle in which *all* active probe nodes report the same
+    non-ok status (dns_poison / tcp_block / http_hijack) → immediate P1.
+  - **Confirmation path**: majority of active nodes (Phase 1: ≥ 2 of 3; Phase 2: ≥ 4 of 6)
+    report non-ok for **2 consecutive cycles** → P1.
+- Worst-case detection latency via fast path ≈ 60s + ~5s aggregation ≈ **65s**.
+- Worst-case via confirmation path ≈ 60s + 60s + ~5s ≈ **125s** (edge of SLA, acceptable
+  because this path exists only to suppress transient single-node blips).
+- Single-node, single-cycle failures become a P3 log, never a P1.
+- `alert:dedup` (see Redis keys) ensures the same status does not re-alert within 1h.
+- **Capacity note**: 12K domains × 3 probe nodes ÷ 60s cycle ≈ 200 checks/s/node. On the
+  1C/1G Phase-1 probe boxes this is achievable only with Go scanner concurrency ≥ 500
+  and DNS/TCP timeouts ≤ 3s. If live load testing shows CPU > 80% sustained, fall back
+  to L1 = 90s and negotiate the SLA to < 3 min with stakeholders before Phase 1 cutover.
 
 **Block detection logic:**
 ```
@@ -126,8 +170,8 @@ Probe Receiver (境外)
 5. CDN migration: clone config from old domain to new domain
 6. Re-render nginx conf with new main domain (prefixes unchanged)
 7. SVN commit + Agent deploy
-8. Wait 30-60s for DNS TTL + CDN propagation
-9. Probe verification from all CN nodes
+8. Wait 30-60s for DNS TTL + CDN propagation (this assumes all managed CNAME TTLs are 60s — see §2.2 rule)
+9. Probe verification from ≥ majority of active CN probe nodes (Phase 1: ≥ 2 of 3; Phase 2: ≥ 4 of 6)
 10. Update DB: old domain → blocked, new domain → active
 ```
 
@@ -135,19 +179,25 @@ Each step has rollback logic. If step N fails, steps 1..N-1 are reversed.
 
 ### 2.6 Standby Pool (internal/pool)
 
-**Lifecycle:** `pending → standby → active → blocked → retired`
+**Lifecycle:** `pending → warming → ready → promoted → blocked → retired`
 
-**Pre-warming (required before standby):**
-1. Create DNS CNAME records for all prefixes
-2. Create CDN configurations for all prefixes
-3. Wait for DNS + CDN propagation
-4. Verify reachability from ALL 6 CN probe nodes
-5. ALL pass → status = standby. ANY fail → status = pending, alert.
+> Naming is deliberately distinct from the main-domain state machine in CLAUDE.md so that
+> `pool.status = ready` is never confused with `main_domain.status = active`, and
+> `pool.status = promoted` clearly marks the moment a pooled domain was swapped in to
+> replace a blocked main domain.
 
-**Pool thresholds:**
-- Normal domains: alert at < 2 remaining
-- Core domains: alert at < 5 remaining
-- Any domain pool = 0: P0 alert (critical)
+**Pre-warming (transition `pending → warming → ready`):**
+1. `pending → warming` when the warmup worker picks up the row
+2. Create DNS CNAME records for all prefixes (TTL = 60)
+3. Create CDN configurations for all prefixes
+4. Wait for DNS + CDN propagation
+5. Verify reachability from ≥ majority of active CN probe nodes (Phase 1: ≥ 2 of 3; Phase 2: ≥ 4 of 6)
+6. ALL required checks pass → status = `ready`. ANY fail → status = `pending`, alert, retry with backoff.
+
+**Pool thresholds (counted over `status = ready` only):**
+- Normal projects: alert at < 2 remaining
+- Core projects: alert at < 5 remaining
+- Any project's `ready` pool = 0: P0 alert (critical)
 
 ---
 
@@ -178,16 +228,22 @@ main_domains 1──N switch_history
 
 ```sql
 CREATE TABLE probe_results (
-    probe_node  VARCHAR(32) NOT NULL,
-    isp         VARCHAR(16) NOT NULL,
-    domain      VARCHAR(253) NOT NULL,
-    status      VARCHAR(16) NOT NULL,
-    dns_ok      BOOLEAN NOT NULL,
-    dns_ips     TEXT[],
-    tcp_latency_ms FLOAT,
-    http_code   SMALLINT,
-    http_hijacked BOOLEAN,
-    checked_at  TIMESTAMPTZ NOT NULL
+    probe_node      VARCHAR(32)  NOT NULL,
+    isp             VARCHAR(16)  NOT NULL,
+    domain          VARCHAR(253) NOT NULL,
+    tier            SMALLINT     NOT NULL,      -- 1=L1, 2=L2, 3=L3
+    status          VARCHAR(16)  NOT NULL,      -- ok / dns_poison / tcp_block / sni_block / http_hijack / content_tamper / timeout
+    block_reason    VARCHAR(64),                -- free-form detail, NULL when ok
+    dns_ok          BOOLEAN      NOT NULL,
+    dns_ips         TEXT[],
+    tcp_latency_ms  FLOAT,
+    tls_handshake_ok BOOLEAN,                   -- L2+ only
+    tls_sni_ok      BOOLEAN,                    -- L2+ only
+    tls_cert_expiry TIMESTAMPTZ,                -- L3 only
+    http_code       SMALLINT,
+    http_hijacked   BOOLEAN,
+    content_hash    BYTEA,                      -- L3 only, for content_tamper detection
+    checked_at      TIMESTAMPTZ  NOT NULL
 );
 
 SELECT create_hypertable('probe_results', 'checked_at');
@@ -223,6 +279,21 @@ TTL: 3600s (same status won't re-alert within 1 hour)
 # nginx reload buffer
 reload:buffer:{server_id} → SET of domain_task_ids
 TTL: 60s (auto-flush if not manually triggered)
+
+# Auto-switch distributed lock — prevents two workers from switching the same domain
+switch:lock:{main_domain_id} → worker_id
+TTL: 600s (hard ceiling for a full switch cycle)
+
+# Release pause flag — set by P0/P1 auto-pause, read by release scheduler
+release:pause:{project_id} → reason_code
+TTL: none (manually cleared by operator)
+
+# Probe cross-cycle consecutive-failure counter (see §2.4 confirmation path)
+probe:fail_streak:{probe_node}:{domain} → integer
+TTL: 300s (resets if no updates)
+
+# asynq internal keys — reserved namespace, do not reuse
+asynq:* → managed by hibiken/asynq, do not write manually
 ```
 
 ---
@@ -254,6 +325,9 @@ CN Probe Node                    Probe Controller
 - JWT tokens: 24h expiry, HS256 signed
 - Password storage: bcrypt, cost factor 12
 - Rate limiting: login endpoint 10 req/min
+- **Login identifier = `username`, NOT email.** This is an internal operator console; user
+  accounts are provisioned manually and do not carry email. Any future password-reset or
+  notification feature MUST use an out-of-band channel (Telegram), not email.
 
 ---
 
@@ -295,6 +369,22 @@ CN Probe Node                    Probe Controller
 - CN probes: 3 → 6 (2 per ISP, north + south coverage)
 - Consider ClickHouse migration if TimescaleDB queries degrade
 
+### Backup & Disaster Recovery (applies from Phase 1)
+
+- **PostgreSQL**: daily `pg_dump` at 04:00 local, retained 14 days on the main node; WAL
+  archiving to an off-site object store with 7-day retention; weekly full base backup
+  shipped off-site, retained 8 weeks.
+- **TimescaleDB hypertable** (`probe_results`): not included in nightly dump (90-day
+  retention policy already acts as bounded state). Continuous aggregates (`probe_hourly`)
+  ARE dumped.
+- **Redis**: AOF `everysec` on the main node. Redis holds only ephemeral state (alert
+  dedup, reload buffers, locks) — loss is tolerable but causes brief re-alert storms.
+- **Config & secrets**: `configs/providers.yaml` and JWT/CA material are versioned in a
+  private repo, NOT in Postgres. Recovery requires both the DB backup and the config repo.
+- **RPO / RTO targets (Phase 1)**: RPO ≤ 24h (daily dump) / ≤ 5min (WAL); RTO ≤ 2h for
+  API+worker; probe nodes are stateless and can be re-provisioned from the scanner binary
+  and a fresh client cert.
+
 ---
 
 ## 6. Build & Deploy
@@ -316,6 +406,9 @@ GOOS=linux GOARCH=amd64 go build -o bin/domain-migrate ./cmd/migrate
 
 # Vue frontend
 cd web && npm run build  # outputs to web/dist/
+# Vite emits hashed chunks (e.g. assets/index.[hash].js), so JS/CSS are cache-safe.
+# index.html MUST be served with `Cache-Control: no-cache` by Caddy, otherwise SPA users
+# will keep loading stale chunk manifests after a deploy.
 ```
 
 ### Deployment Process

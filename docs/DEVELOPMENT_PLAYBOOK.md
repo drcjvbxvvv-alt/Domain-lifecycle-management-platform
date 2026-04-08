@@ -322,11 +322,15 @@ func (h *TaskHandler) HandlePoolWarmup(ctx context.Context, t *asynq.Task) error
         zap.Int64("pool_domain_id", payload.PoolDomainID),
     )
 
-    // Step 1: Create DNS records for all prefixes
+    // Step 0: Transition pool row pending → warming (see ARCHITECTURE.md §2.6)
+    // Step 1: Create DNS records for all prefixes (TTL = 60, see §2.2 rule)
     // Step 2: Create CDN configs for all prefixes
     // Step 3: Wait for propagation
-    // Step 4: Probe verification from all CN nodes
-    // Step 5: Update status to standby (or pending if failed)
+    // Step 4: Probe verification — require ≥ majority of active CN probe nodes
+    //         (Phase 1: ≥ 2 of 3; Phase 2: ≥ 4 of 6)
+    // Step 5: Update status → ready on success, → pending on failure (with
+    //         warmup_attempts++ and warmup_last_error set). NEVER write 'standby'
+    //         or 'active' here — those names belong to the old schema.
 
     return nil
 }
@@ -461,6 +465,39 @@ export const useDomainStore = defineStore('domain', () => {
 
 ---
 
+## 5.5 How to Add a Release (canary + shard sizing)
+
+When building a Release row in code or in an admin form, honor the following invariants
+(enforced in the service layer, not the DB):
+
+```go
+// internal/release/service.go
+func (s *Service) NewRelease(projectID int64, total int) *Release {
+    canary := total * 2 / 100  // 2%
+    if canary > 30 { canary = 30 }
+    if canary < 10 { canary = 10 }
+    if canary > total { canary = total }
+
+    return &Release{
+        ProjectID:       projectID,
+        TotalDomains:    total,
+        ShardSize:       200,     // normal shards 200–500
+        CanaryShardSize: canary,
+        CanaryThreshold: 0.95,
+    }
+}
+```
+
+- A Release is scoped to **one project**. To roll out across projects, dispatch
+  multiple Releases and coordinate in the UI, never merge them into one DB row.
+- Shard 0 is always the canary shard sized per the formula above.
+- Shards 1..N use `shard_size` (default 200). Domains are assigned by
+  `hash(main_domain_id) % shard_count` so retries land in the same shard.
+- The release scheduler MUST check `release:pause:{project_id}` before starting
+  each shard and abort cleanly if the pause flag is set.
+
+---
+
 ## 6. Common Patterns Reference
 
 ### Pagination (cursor-based)
@@ -530,3 +567,9 @@ ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 defer cancel()
 srv.Shutdown(ctx)
 ```
+
+### Login identifier
+
+- User accounts use **`username`**, not email. API payloads, Pinia stores, TypeScript
+  types, and Go DTOs MUST all name the field `username`. Do not reintroduce `email` on
+  the `users` table or in any login path. See ARCHITECTURE.md §4 and ADR-0001.
