@@ -23,6 +23,12 @@ Read these documents in this order when starting a new task:
 | **DATABASE_SCHEMA.md** | When creating migrations or writing queries | Complete schema, index strategy, conventions |
 | **DEVELOPMENT_PLAYBOOK.md** | When implementing any feature | Step-by-step patterns for adding APIs, providers, tasks, pages |
 | **TESTING.md** | When writing or modifying tests | Test patterns, mock strategies, coverage requirements |
+| **docs/adr/0001-...** | Before touching schema, probe, pool, release, or auth | 13 decisions that revised the original architecture on 2026-04-08 |
+| **docs/adr/0002-...** | Before touching switcher, state machine, prefix_rules, CDN providers, worker queues | 6 pre-implementation decisions added on 2026-04-08: switch-lock fallback, status single write path, prefix_rules rebuild flow, CDN idempotency, queue priorities, pool lifecycle |
+
+> **When an ADR conflicts with an older line in this document, the ADR wins.**
+> The ADRs are the most recent source of truth and supersede any stale
+> description here.
 
 ---
 
@@ -144,7 +150,7 @@ Read these documents in this order when starting a new task:
 #### P1 — 探針與告警（Week 5）
 
 ```
-□ cmd/scanner/main.go                         L1 500 goroutines / 90s，L2 5min
+□ cmd/scanner/main.go                         L1 500 goroutines / 60s，L2 5min（ADR-0001 D5）
 □ internal/probe/poison.go                    GFW 毒化 IP 清單（可 API 更新）
 □ api/handler/probe.go                        POST /api/v1/probe/push（mTLS）
 □ store/timescale/probe.go                    批次寫入 probe_results
@@ -152,7 +158,7 @@ Read these documents in this order when starting a new task:
 □ internal/alert/engine.go                    嚴重度判斷、去重、批次聚合
 □ pkg/notify/telegram.go                      Telegram Bot 通知
 □ pkg/notify/webhook.go                       Webhook 通知
-□ internal/switcher/service.go                9 步驟切換流程 + distributed lock
+□ internal/switcher/service.go                Redis + PG 雙鎖 + 9 步驟切換流程（ADR-0002 D1）
 □ internal/pool/service.go                    備用域名管理、預熱流程
 ```
 
@@ -214,9 +220,17 @@ Read these documents in this order when starting a new task:
 
 1. **Layer discipline**: handler → service → store. Never skip layers. Never import upward.
 2. **Provider abstraction**: ALL DNS/CDN operations go through `pkg/provider/` interfaces. Business logic in `internal/` NEVER imports vendor SDKs directly.
-3. **State machine enforcement**: Domain status transitions MUST go through `CanTransition()`. Never set status directly with raw SQL UPDATE.
+3. **State machine single write path** (ADR-0002 D2): Domain status transitions MUST go through `internal/domain.Service.Transition(ctx, id, from, to, reason, triggeredBy)`. NO package may `UPDATE main_domains SET status` directly. `grep -r 'UPDATE main_domains SET status' --include='*.go'` must return exactly one hit — the query constant inside `store/postgres/domain.go::updateStatusTx`, called only by `Transition()`.
 4. **Snapshot before deploy**: Every nginx conf change MUST save a snapshot to `conf_snapshots` BEFORE deployment. Rollback depends on this.
 5. **Audit everything**: Every write operation (create, update, delete, deploy, switch, rollback) MUST write an audit log entry.
+
+### Architectural Rules added by ADR-0002
+
+18. **Switch lock** (D1): Redis `switch:lock:{main_domain_id}` (fast path) + Postgres `SELECT ... FOR UPDATE` on `main_domains` (authoritative). Redis loss MUST NOT enable double switching. See ARCHITECTURE.md §2.5 step 0.
+19. **Prefix rules soft-frozen** (D3): After a `prefix_rules` row has been referenced by any `subdomains` row, editing its runtime fields requires a `kind='rebuild'` release. See DEVELOPMENT_PLAYBOOK.md §7.
+20. **CDN CloneConfig idempotency** (D4): Every CDN provider's `CloneConfig` must be idempotent. Unit test `TestCloneConfig_Idempotent` is mandatory. See ARCHITECTURE.md §2.2.
+21. **asynq queue layout is canonical** (D5): `critical / dns / cdn / deploy / default` with the priority and concurrency in ARCHITECTURE.md §2.3. `cmd/worker/main.go` is the only place this is configured.
+22. **Pool lifecycle completeness** (D6): After `promoted`, allowed transitions are `blocked → retired` (terminal, burn the domain) or `blocked → pending` (operator un-block, re-warm). See ARCHITECTURE.md §2.6.
 
 ### Code Quality Rules
 
@@ -268,7 +282,7 @@ When building any feature, always implement in this exact order:
 | 4 | Audit log location | Service layer, NOT middleware | Middleware doesn't know target UUID |
 | 5 | Provider rate limit | Handled inside provider implementation | Business logic must not sense vendor quirks |
 | 6 | nginx reload | 30s aggregation buffer / max 50 domains | Batch efficiency, avoid reload storms |
-| 7 | Switch concurrency | Redis distributed lock per mainDomainID | Prevent double-switch race condition |
+| 7 | Switch concurrency | Redis fast path + Postgres `SELECT … FOR UPDATE` fallback (ADR-0002 D1) | Prevent double-switch even under Redis loss |
 | 8 | Probe auth | mTLS (client cert per probe node) | Scanner is in mainland China, needs mutual auth |
 | 9 | Conf rollback | Snapshot to conf_snapshots BEFORE deploy | Rollback requires known-good snapshot |
 | 10 | Vue routing | History mode | Caddy must have try_files fallback rule |
@@ -368,7 +382,7 @@ internal/auth/
   service.go     Login, ChangePassword
   model.go       User struct
 store/postgres/
-  user.go        GetByEmail, GetByID, Create, UpdateLastLogin
+  user.go        GetByUsername, GetByID, Create, UpdateLastLogin
 api/handler/
   auth.go        POST /api/v1/auth/login
 ```
@@ -376,7 +390,7 @@ api/handler/
 Rules:
 - Password: bcrypt cost=12
 - JWT payload: `user_id`, `role`, `exp`, `iat`
-- Login failure: always return "invalid credentials" — never distinguish email vs password
+- Login failure: always return "invalid credentials" — never distinguish username vs password (login identifier = `username`, NOT email, per ADR-0001)
 - No refresh token (24h expiry is sufficient for this use case)
 
 ### 1.6 Project CRUD
@@ -622,15 +636,17 @@ const (
 )
 ```
 
-Queue configuration:
+Queue configuration (canonical layout in ARCHITECTURE.md §2.2 per ADR-0002 D5 — this table is a mirror; if they ever diverge, ARCHITECTURE.md wins):
 
-| Queue | Tasks | Priority | Concurrency |
-|-------|-------|----------|-------------|
-| `critical` | switch:execute, probe:verify | 10 | 20 |
-| `dns` | dns:* | 6 | 10 |
-| `cdn` | cdn:* | 6 | 10 |
-| `deploy` | svn:*, agent:*, nginx:* | 4 | 5 (serial per server) |
-| `default` | template:render, pool:* | 2 | 10 |
+| Queue | Tasks | Priority weight | Concurrency |
+|-------|-------|-----------------|-------------|
+| `critical` | `switch:execute`, `probe:verify` | 10 | 20 |
+| `dns` | `dns:*` | 6 | 10 |
+| `cdn` | `cdn:*` | 6 | 10 |
+| `deploy` | `svn:*`, `agent:*`, `nginx:*` | 4 | 5 (serial per server) |
+| `default` | `template:*`, `pool:*` | 2 | 10 |
+
+`strict: false` — weighted priority, not strict priority. `cmd/worker/main.go::asynq.Config.Queues` is the only place this layout is configured.
 
 Rule: every task Payload struct MUST include `DomainTaskID int64` for progress tracking to DB.
 
@@ -746,16 +762,27 @@ const (
 File: `cmd/scanner/main.go`
 
 ```
-L1 Scan (every 90s):
+L1 Scan (every 60s) — ADR-0001 D5:
   Source:      GET /api/v1/probe/domains  (returns all active/degraded domains)
   Workers:     500 goroutines
   Per domain:  DNS query (3s timeout) + TCP :443 connect (3s timeout)
   Batch push:  POST /api/v1/probe/push, 100 results per batch
+  Capacity:    12K domains × 3 nodes ÷ 60s ≈ 200 checks/s/node (see ARCHITECTURE.md §2.4)
+  Fallback:    if 1C/1G probe box CPU > 80% sustained in load test,
+               fall back to 90s + renegotiate SLA to < 3 min BEFORE cutover.
 
 L2 Scan (every 5min):
   Source:      L1-passed domains only
   Sample:      1–2 random subdomains per domain
   Per domain:  HTTP GET (8s timeout), check status code + latency
+
+L3 Scan (every 30s) — tagged core domains only:
+  HTTP + keyword check + TLS handshake + cert expiry + content hash diff
+
+Alerting paths (L1, ADR-0001 D5):
+  - Fast path: single cycle, all active nodes report same non-ok status → P1
+  - Confirmation path: majority of nodes, 2 consecutive cycles → P1
+    (Phase 1 majority = 2 of 3 nodes; Phase 2 majority = 4 of 6 nodes)
 
 GFW poison IP list (hardcoded, updatable via API):
   127.0.0.1, 243.185.187.39, 74.125.127.102, ...
@@ -813,42 +840,58 @@ File: `internal/switcher/service.go`
 ```
 TriggerSwitch(ctx, mainDomainID int64, reason string) error
 
-1. Acquire Redis distributed lock: lock:switch:{mainDomainID}
-   → Already locked → return (another switch in progress)
+0. Acquire switch lock (ADR-0002 D1):
+   a. Redis fast path: SETNX switch:lock:{mainDomainID} <workerID> EX 600
+      → Already locked → return ErrSwitchInProgress
+      → Redis unreachable → log warning, skip to (b)
+   b. Postgres row lock (authoritative):
+      BEGIN; SELECT id, status FROM main_domains WHERE id = $1 FOR UPDATE;
+      → PG unreachable → ABORT, no fallback
+   Hold BOTH locks for the full switch cycle (≤ 600s TTL).
 
-2. Select standby domain from pool:
-   SELECT ... WHERE project_id=? AND status='standby'
+1. Select ready domain from pool:
+   SELECT ... WHERE project_id=? AND status='ready'
    ORDER BY priority DESC LIMIT 1 FOR UPDATE
    → None available → P0 alert + return ErrPoolExhausted
 
-3. Send P1 alert (Telegram + Webhook)
+2. Send P1 alert (Telegram + Webhook)
 
-4. Pause all pending/running releases for this project
+3. Pause all pending/running releases for this project (set release:pause:{project_id})
 
-5. INSERT switch_history (status='in_progress')
+4. INSERT switch_history (status='in_progress')
+
+5. Transition old main_domain: 'active' → 'switching' via domain.Service.Transition()
 
 6. Execute switch steps (each step has rollback on failure):
-   a. CDN CloneConfig:  old_domain → new_domain
-   b. Per subdomain:    DNS DeleteRecord(old) + CreateRecord(new)
+   a. CDN CloneConfig:  old_domain → new_domain  (MUST be idempotent, ADR-0002 D4)
+   b. Per subdomain:    DNS DeleteRecord(old) + CreateRecord(new, TTL=60)
    c. Update DB:        subdomains.fqdn, main_domains.domain
    d. RenderAll with new domain name
-   e. SVN commit + Agent deploy
-   f. Wait 60s (DNS TTL + CDN propagation)
-   g. Probe verify — ALL 6 CN nodes must pass
+   e. Snapshot conf to conf_snapshots BEFORE deploy
+   f. SVN commit + Agent deploy
+   g. Wait 30–60s (DNS TTL + CDN propagation — assumes TTL=60 per ADR-0001 D3)
+   h. Probe verify — ≥ majority of active CN nodes must pass
+      (Phase 1: ≥ 2 of 3;  Phase 2: ≥ 4 of 6)  — ADR-0001 D2
 
-7. On success:
-   - old main_domain.status  → "blocked"
-   - new main_domain.status  → "active"
-   - pool entry.status       → "active"
-   - switch_history.status   → "completed"
+7. On success (all transitions via domain.Service.Transition()):
+   - old main_domain.status  'switching' → 'blocked'   triggeredBy='switcher'
+   - new main_domain.status  'deploying' → 'active'    triggeredBy='switcher'
+   - pool.Service.OnSwitchCommitted(poolRowID):
+       ready → promoted  (atomic with the new main_domain transition)
+   - switch_history.status → 'completed'
    - Send INFO alert (switch completed)
 
 8. On failure:
-   - switch_history.status   → "failed", error_detail = failed step
+   - switch_history.status → 'failed', error_detail = failed step
    - Rollback completed steps in reverse order
+   - old main_domain: 'switching' → 'active' via Transition() (if rollback succeeds)
    - Send P0 alert (auto-switch failed, manual intervention required)
 
-9. Release distributed lock
+9. Release locks:
+   - DEL switch:lock:{mainDomainID}  (Redis first)
+   - COMMIT Postgres tx               (then PG)
+   If the process crashes between the two, Redis TTL (600s) cleans up and
+   PG tx is rolled back by connection termination.
 ```
 
 ---

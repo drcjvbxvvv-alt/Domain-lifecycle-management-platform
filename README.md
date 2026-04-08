@@ -7,7 +7,7 @@
 ## 功能概覽
 
 - **域名自動化部署** — DNS 建立 → CDN 配置 → nginx conf 渲染 → SVN 提交 → Agent 部署 → 探針驗證，全流程自動化
-- **三層探針監控** — 從 6 個中國大陸節點（電信/聯通/移動）持續監控，90 秒一輪
+- **三層探針監控** — 從中國大陸節點（電信/聯通/移動，Phase 1 每 ISP 一台共 3 台；Phase 2 擴展到 6 台）持續監控，60 秒一輪
 - **GFW 封鎖偵測** — 識別 DNS 毒化、TCP 封鎖、SNI 封鎖、HTTP 劫持
 - **自動切換（< 5 分鐘）** — 偵測到封鎖後自動從備用域名池取出域名，完整切換並驗證
 - **批次發布（Canary）** — Shard 分批發布，成功率 < 95% 自動暫停，支援獨立 rollback
@@ -20,7 +20,7 @@
 
 | 層級 | 技術 |
 |------|------|
-| 後端語言 | Go 1.26 |
+| 後端語言 | Go 1.22+ |
 | API 框架 | Gin |
 | 資料庫存取 | sqlx（原生 SQL，無 ORM） |
 | 任務佇列 | asynq（Redis-backed） |
@@ -91,7 +91,7 @@ domain-platform/
 
 ### 環境需求
 
-- Go 1.26+
+- Go 1.22+
 - Docker & Docker Compose
 - Node.js 20+ / npm 10+
 
@@ -240,6 +240,15 @@ blocked ──→ retired（終態）
 | `docs/DATABASE_SCHEMA.md` | 完整 DB Schema、索引策略 |
 | `docs/DEVELOPMENT_PLAYBOOK.md` | 新增 API / Provider / Task / 頁面的步驟範本 |
 | `docs/TESTING.md` | 測試策略、mock 模式、覆蓋率要求 |
+
+### Architecture Decision Records（ADR）
+
+實作前的所有重大決策以 ADR 形式記錄於 `docs/adr/`。**ADR 為最新事實來源**；若 ADR 與其他文件衝突，以 ADR 為準。
+
+| ADR | 標題 | 狀態 |
+|-----|------|------|
+| [ADR-0001](docs/adr/0001-architecture-revision-2026-04.md) | Architecture revision 2026-04（initial platform architecture） | Accepted |
+| [ADR-0002](docs/adr/0002-pre-implementation-adjustments-2026-04.md) | Pre-implementation adjustments（state machine 單一寫入路徑、switch dual lock、prefix_rules soft-freeze、CDN clone 冪等、asynq queue 優先級、pool promoted lifecycle） | Accepted (2026-04-08) |
 
 ---
 

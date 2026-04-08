@@ -2,6 +2,14 @@
 
 > Claude Code: reference this when creating migrations or writing queries.
 
+> **Pre-launch migration exception (continuation).** ADR-0001 (2026-04-08)
+> established a one-time exception allowing the initial migration file
+> `000001_init.up.sql` to be modified in place because the project had not
+> shipped production data yet. ADR-0002 (same day) applies that same
+> exception to add `releases.kind` and `chk_task_type`. After Phase 1
+> cutover this exception window closes permanently — every subsequent
+> schema change MUST be a new numbered migration file.
+
 ---
 
 ## Conventions
@@ -179,11 +187,17 @@ CREATE TABLE servers (
 -- ============================================================
 -- RELEASES
 -- ============================================================
+-- `kind` distinguishes normal deploy releases from prefix-rule rebuild releases
+-- (see ADR-0002 D3). Both use the same Shard / DomainTask pipeline, so the
+-- column is informational for filtering/audit but load-bearing for the
+-- rebuild flow because the service layer reads it to decide which subdomains
+-- to enumerate.
 CREATE TABLE releases (
     id              BIGSERIAL PRIMARY KEY,
     uuid            UUID NOT NULL DEFAULT gen_random_uuid(),
     project_id      BIGINT NOT NULL REFERENCES projects(id),
     title           VARCHAR(200),
+    kind            VARCHAR(20) NOT NULL DEFAULT 'deploy',
     status          VARCHAR(20) NOT NULL DEFAULT 'pending',
     total_domains   INT NOT NULL DEFAULT 0,
     shard_size      INT NOT NULL DEFAULT 200,
@@ -192,6 +206,9 @@ CREATE TABLE releases (
     created_by      BIGINT,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT chk_release_kind CHECK (
+        kind IN ('deploy','rebuild')
+    ),
     CONSTRAINT chk_release_status CHECK (
         status IN ('pending','running','paused','completed','failed','rolled_back')
     )
@@ -228,13 +245,16 @@ CREATE TABLE domain_tasks (
     release_id      BIGINT REFERENCES releases(id),
     shard_id        BIGINT REFERENCES release_shards(id),
     main_domain_id  BIGINT NOT NULL REFERENCES main_domains(id),
-    task_type       VARCHAR(30) NOT NULL,  -- 'deploy', 'switch', 'rollback'
+    task_type       VARCHAR(30) NOT NULL,  -- 'deploy','rebuild','switch','rollback'
     status          VARCHAR(20) NOT NULL DEFAULT 'pending',
     step            VARCHAR(30),
     error_detail    TEXT,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     completed_at    TIMESTAMPTZ,
+    CONSTRAINT chk_task_type CHECK (
+        task_type IN ('deploy','rebuild','switch','rollback')
+    ),
     CONSTRAINT chk_task_status CHECK (
         status IN ('pending','dns','cdn','render','svn','deploy','verify','completed','failed','rolled_back')
     )
@@ -370,3 +390,114 @@ DROP TABLE IF EXISTS main_domains CASCADE;
 DROP TABLE IF EXISTS prefix_rules CASCADE;
 DROP TABLE IF EXISTS projects CASCADE;
 ```
+
+---
+
+## Query Patterns
+
+### `main_domains.status` single write path (ADR-0002 D2)
+
+`main_domains.status` is mutated in exactly one query constant in the
+codebase:
+
+```go
+// store/postgres/domain.go
+const updateStatusTx = `
+    UPDATE main_domains
+    SET status = $2, updated_at = NOW()
+    WHERE id = $1`
+```
+
+This constant is called from exactly one place:
+`internal/domain/service.go::Transition()`. The full transaction template is:
+
+```go
+func (s *Service) Transition(ctx context.Context, id int64, from, to, reason, triggeredBy string) error {
+    tx, err := s.db.BeginTxx(ctx, nil)
+    if err != nil { return fmt.Errorf("begin tx: %w", err) }
+    defer tx.Rollback()
+
+    var current string
+    if err := tx.GetContext(ctx, &current,
+        `SELECT status FROM main_domains WHERE id = $1 FOR UPDATE`, id); err != nil {
+        return fmt.Errorf("lock main_domain %d: %w", id, err)
+    }
+
+    if current != from {
+        return ErrStatusRaceCondition
+    }
+    if !CanTransition(current, to) {
+        return ErrInvalidTransition
+    }
+
+    if _, err := tx.ExecContext(ctx, updateStatusTx, id, to); err != nil {
+        return fmt.Errorf("update status: %w", err)
+    }
+
+    if _, err := tx.ExecContext(ctx, insertHistoryTx,
+        id, from, to, reason, triggeredBy); err != nil {
+        return fmt.Errorf("insert history: %w", err)
+    }
+
+    return tx.Commit()
+}
+```
+
+CI gate:
+```bash
+grep -rn 'UPDATE main_domains SET status' --include='*.go' .
+# Must return exactly one line, inside store/postgres/domain.go
+```
+
+### Switch lock query (ADR-0002 D1)
+
+```go
+// internal/switcher/service.go
+func (s *Service) acquireSwitchLock(ctx context.Context, mainDomainID int64) (*sqlx.Tx, error) {
+    // Step 1: Redis fast path
+    workerID := s.workerID
+    ok, redisErr := s.redis.SetNX(ctx,
+        fmt.Sprintf("switch:lock:%d", mainDomainID),
+        workerID,
+        600*time.Second,
+    ).Result()
+    if redisErr != nil {
+        s.logger.Warn("redis unreachable, falling back to PG row lock only",
+            zap.Int64("main_domain_id", mainDomainID),
+            zap.Error(redisErr),
+        )
+        // Fall through to PG lock
+    } else if !ok {
+        return nil, ErrSwitchInProgress
+    }
+
+    // Step 2: Postgres row lock (authoritative)
+    tx, err := s.db.BeginTxx(ctx, nil)
+    if err != nil {
+        return nil, fmt.Errorf("begin tx: %w", err)
+    }
+
+    var row struct {
+        ID     int64
+        Status string
+    }
+    if err := tx.GetContext(ctx, &row,
+        `SELECT id, status FROM main_domains WHERE id = $1 FOR UPDATE`,
+        mainDomainID,
+    ); err != nil {
+        tx.Rollback()
+        return nil, fmt.Errorf("lock main_domain %d: %w", mainDomainID, err)
+    }
+
+    if !CanTransition(row.Status, "switching") {
+        tx.Rollback()
+        return nil, ErrInvalidTransition
+    }
+
+    return tx, nil  // caller holds the tx for the duration of the switch
+}
+```
+
+Release order: `DEL switch:lock:{id}`, then `tx.Commit()`. If the process
+crashes between the two, the Redis TTL (600s) cleans up the orphan lock and
+the Postgres transaction is rolled back by connection termination.

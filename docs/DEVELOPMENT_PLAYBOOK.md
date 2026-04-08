@@ -208,6 +208,13 @@ func NewTencentProvider(secretID, secretKey string, logger *zap.Logger) (*Tencen
 
 func (p *TencentProvider) Name() string { return "tencent" }
 
+// IMPORTANT — CDN providers: CloneConfig MUST be idempotent (ADR-0002 D4).
+// Calling CloneConfig(src, dst) twice must converge to the same final state
+// as calling it once. Unit test `TestCloneConfig_Idempotent` is mandatory
+// for every CDN provider. See pkg/provider/cdn/*_test.go for the template.
+// DNS providers: TTL = 60 is a hard rule (ADR-0001 D3). Reject registration
+// if the provider cannot honor 60s TTL.
+
 func (p *TencentProvider) CreateRecord(ctx context.Context, zone string, record Record) (*Record, error) {
     req := dnspod.NewCreateRecordRequest()
     req.Domain = &zone
@@ -362,13 +369,26 @@ func (s *Service) AddStandbyDomain(ctx context.Context, projectID int64, domain 
     task := asynq.NewTask(tasks.TypePoolWarmup, payload,
         asynq.MaxRetry(3),
         asynq.Timeout(10*time.Minute),
-        asynq.Queue("pool"),
+        asynq.Queue("default"),  // pool:warmup lives in `default` per ARCHITECTURE.md §2.3
     )
 
     _, err := s.taskClient.Enqueue(task)
     return err
 }
 ```
+
+**Queue selection cheat-sheet** (canonical table in `ARCHITECTURE.md §2.3`):
+
+| Task prefix | Queue | Why |
+|---|---|---|
+| `switch:execute`, `probe:verify` | `critical` | Must preempt routine DNS/CDN work during incidents |
+| `dns:*` | `dns` | Isolate DNS API quota |
+| `cdn:*` | `cdn` | Isolate CDN API quota |
+| `svn:*`, `agent:*`, `nginx:*` | `deploy` | Serial per server (concurrency=5) |
+| `template:*`, `pool:*` | `default` | Low priority, high concurrency |
+
+Never hand-pick a different queue — the layout is load-bearing for the
+auto-switch SLA (ADR-0002 D5).
 
 ---
 
@@ -498,7 +518,183 @@ func (s *Service) NewRelease(projectID int64, total int) *Release {
 
 ---
 
-## 6. Common Patterns Reference
+## 6. How to Change a Domain's Status
+
+**NEVER write `UPDATE main_domains SET status` directly** — per ADR-0002 D2
+and CLAUDE.md Critical Rule #8. The only allowed entry point is
+`internal/domain.Service.Transition()`.
+
+### Caller template
+
+```go
+// From any package that needs to mutate status:
+//   internal/release/service.go
+//   internal/switcher/service.go
+//   internal/pool/service.go
+//   internal/domain/deployer.go
+//   probe-triggered auto-handlers
+
+err := s.domainSvc.Transition(ctx,
+    mainDomainID,
+    "active",        // expected current (optimistic check)
+    "degraded",      // target
+    "probe: 2 of 3 nodes report dns_poison",
+    "probe:cn-probe-ct",
+)
+if errors.Is(err, domain.ErrStatusRaceCondition) {
+    // Someone else already moved this domain; re-read state and decide
+    return nil
+}
+if errors.Is(err, domain.ErrInvalidTransition) {
+    // CanTransition(active, degraded) would normally succeed — this means
+    // the domain's actual current state differs from "active". Log and
+    // re-read.
+    s.logger.Warn("invalid transition", ...)
+    return err
+}
+if err != nil {
+    return fmt.Errorf("transition %d to degraded: %w", mainDomainID, err)
+}
+```
+
+### `triggeredBy` conventions
+
+| Origin | Format | Example |
+|---|---|---|
+| User action from UI | `"user:{uuid}"` | `"user:a3f2-..."` |
+| Release scheduler | `"release:{uuid}"` | `"release:b9c1-..."` |
+| Switcher auto-switch | `"switcher"` | `"switcher"` |
+| Probe-triggered | `"probe:{node_name}"` | `"probe:cn-probe-ct"` |
+| System maintenance | `"system"` | `"system"` |
+
+### Why not a direct store method?
+
+Because `Transition()` enforces four things in one atomic transaction that
+a store-level call cannot:
+
+1. `SELECT ... FOR UPDATE` row lock (prevents race with switcher)
+2. Optimistic `current == from` check (catches double-triggered handlers)
+3. `CanTransition()` validation (prevents illegal states)
+4. `domain_state_history` insert (guaranteed audit trail)
+
+Any shortcut that skips one of these four produces a silent correctness
+bug. The CI grep gate makes the shortcut visible at review time.
+
+---
+
+## 7. How to Rebuild Subdomains After a Prefix-Rule Change
+
+Per ADR-0002 D3, `prefix_rules` runtime fields are soft-frozen after first
+use. Operators who need to change a rule's `dns_provider`, `cdn_provider`,
+`nginx_template`, or `html_template` MUST go through the rebuild flow.
+
+### Handler flow
+
+```go
+// api/handler/prefix_rule.go
+func (h *PrefixRuleHandler) Update(c *gin.Context) {
+    var req UpdatePrefixRuleRequest
+    if err := c.ShouldBindJSON(&req); err != nil {
+        c.JSON(http.StatusBadRequest, ErrorResponse(40001, err.Error()))
+        return
+    }
+
+    // Service layer detects runtime-field changes and rejects if !req.Rebuild
+    release, err := h.service.UpdateWithRebuild(c.Request.Context(), projectID, prefix, &req)
+    if errors.Is(err, project.ErrPrefixRuleDriftRequiresRebuild) {
+        c.JSON(http.StatusConflict, ErrorResponse(40902,
+            "prefix_rule edit affects existing subdomains; pass {rebuild: true} to create a rebuild release"))
+        return
+    }
+    if err != nil {
+        InternalError(c, h.logger, err)
+        return
+    }
+
+    c.JSON(http.StatusOK, SuccessResponse(release.ToResponse()))
+}
+```
+
+### Service layer
+
+```go
+// internal/project/prefix_service.go
+func (s *Service) UpdateWithRebuild(ctx context.Context, projectID int64, prefix string, req *UpdatePrefixRuleRequest) (*release.Release, error) {
+    tx, err := s.db.BeginTxx(ctx, nil)
+    if err != nil { return nil, fmt.Errorf("begin tx: %w", err) }
+    defer tx.Rollback()
+
+    // 1. Load current rule
+    current, err := s.store.GetTx(ctx, tx, projectID, prefix)
+    if err != nil { return nil, err }
+
+    // 2. Detect runtime-field change
+    runtimeChanged :=
+        current.DNSProvider   != req.DNSProvider   ||
+        current.CDNProvider   != req.CDNProvider   ||
+        current.NginxTemplate != req.NginxTemplate ||
+        current.HtmlTemplate  != req.HtmlTemplate
+
+    // 3. If runtime fields changed AND existing subdomains reference this rule:
+    //    require rebuild flag and create a rebuild release
+    if runtimeChanged {
+        affected, err := s.subStore.ListByPrefixRuleTx(ctx, tx, projectID, prefix)
+        if err != nil { return nil, err }
+
+        if len(affected) > 0 && !req.Rebuild {
+            return nil, ErrPrefixRuleDriftRequiresRebuild
+        }
+
+        // 4. Update prefix_rule and all affected subdomain snapshots atomically
+        if err := s.store.UpdateTx(ctx, tx, current.ID, req); err != nil {
+            return nil, fmt.Errorf("update prefix_rule: %w", err)
+        }
+        for _, sub := range affected {
+            if err := s.subStore.UpdateProviderSnapshotTx(ctx, tx, sub.ID, req); err != nil {
+                return nil, fmt.Errorf("update subdomain %d: %w", sub.ID, err)
+            }
+        }
+
+        // 5. Create rebuild release with all affected main_domains
+        mainDomainIDs := uniqueMainDomainIDs(affected)
+        rel := release.NewRebuildRelease(projectID, mainDomainIDs, req.Reason)
+        if err := s.releaseStore.CreateTx(ctx, tx, rel); err != nil {
+            return nil, fmt.Errorf("create rebuild release: %w", err)
+        }
+
+        if err := tx.Commit(); err != nil { return nil, err }
+
+        // 6. Enqueue the release to start (outside the tx)
+        return rel, s.releaseScheduler.Start(ctx, rel.ID)
+    }
+
+    // Purpose-only edit — no rebuild needed
+    if err := s.store.UpdateTx(ctx, tx, current.ID, req); err != nil {
+        return nil, fmt.Errorf("update prefix_rule: %w", err)
+    }
+    return nil, tx.Commit()
+}
+```
+
+### Release execution
+
+A rebuild release uses the normal `release.Service.Run()` pipeline with one
+difference: `domain_tasks.task_type = 'rebuild'` instead of `'deploy'`, and
+step 1 (DNS) and step 2 (CDN) are skipped if the provider didn't change.
+The render / svn / reload / verify steps always run.
+
+### Rollback
+
+Canary failure on a rebuild release → operator options:
+1. **Rollback**: restore old `prefix_rules` values from `conf_snapshots` via
+   `release.Service.Rollback()`. Requires a reverse-direction update of the
+   subdomain snapshots.
+2. **Roll forward**: fix the template and create a new rebuild release with
+   the corrected values.
+
+---
+
+## 8. Common Patterns Reference
 
 ### Pagination (cursor-based)
 

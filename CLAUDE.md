@@ -528,7 +528,7 @@ active ──→ suspended (manual) ──→ active (manual restore)
 blocked ──→ retired (terminal)
 ```
 
-**State transitions MUST be validated.** Never set status directly — always use the state machine:
+**State transitions MUST be validated AND go through `Transition()`.** Never set status directly — always use the state machine via the single write path (see Critical Rule #8 and ADR-0002 D2):
 
 ```go
 // internal/domain/statemachine.go
@@ -551,7 +551,27 @@ func CanTransition(from, to string) bool {
     }
     return false
 }
+
+// internal/domain/service.go — THE ONLY write path for main_domains.status
+func (s *Service) Transition(
+    ctx context.Context,
+    id int64,
+    from string,          // expected current status (optimistic check)
+    to string,
+    reason string,
+    triggeredBy string,   // "user:{uuid}" | "system" | "probe:{node}" | "switcher" | "release:{uuid}"
+) error {
+    // Inside one transaction:
+    //   1. SELECT status FROM main_domains WHERE id = $1 FOR UPDATE
+    //   2. Assert current == from       → ErrStatusRaceCondition
+    //   3. Assert CanTransition(from,to) → ErrInvalidTransition
+    //   4. UPDATE main_domains SET status = $to, updated_at = NOW()
+    //   5. INSERT domain_state_history
+    //   6. COMMIT
+}
 ```
+
+**Enforcement**: `grep -r 'UPDATE main_domains SET status' --include='*.go'` must return exactly one hit — the query constant inside `store/postgres/domain.go::updateStatusTx`, which is only called by `Transition()`. Any PR that introduces a second hit must be rejected in review.
 
 ---
 
@@ -564,6 +584,9 @@ func CanTransition(from, to string) bool {
 5. **Publish success ≠ final success.** SVN deploy success is not enough — probe verification from CN nodes must pass before marking `active`.
 6. **Every conf publish must snapshot.** Save full conf to DB/filesystem BEFORE deployment. Rollback depends on this.
 7. **Alerts must deduplicate.** Same domain, same status → 1 alert per hour max. Batch multiple domain alerts into one message.
+8. **`main_domains.status` has ONE write path.** All status mutations go through `internal/domain.Service.Transition(ctx, id, from, to, reason, triggeredBy)`. NO package may `UPDATE main_domains SET status` directly — `internal/release`, `internal/switcher`, `internal/pool`, and `internal/domain/deployer.go` all route through `Transition()`. The method atomically `SELECT ... FOR UPDATE`, validates the transition, updates the row, and writes `domain_state_history`. See ADR-0002 D2.
+9. **`prefix_rules` are soft-frozen after first use.** Once any `subdomains` row references a `prefix_rules` row, its runtime fields (`dns_provider`, `cdn_provider`, `nginx_template`, `html_template`) cannot be changed in isolation — any edit request must be accompanied by a `kind='rebuild'` release that re-renders + redeploys all affected subdomains through the standard canary pipeline. See ADR-0002 D3.
+10. **Switch lock is Redis fast path + Postgres row lock.** `internal/switcher/service.go` acquires `switch:lock:{main_domain_id}` in Redis AND `SELECT ... FOR UPDATE` on the `main_domains` row. Redis loss must not enable double switching. See ADR-0002 D1.
 
 ---
 

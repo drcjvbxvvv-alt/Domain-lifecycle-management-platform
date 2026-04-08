@@ -40,6 +40,45 @@ Project-level ALWAYS wins.
 - Domain state machine enforcement (see CLAUDE.md)
 - Audit trail for all state transitions
 
+**Rule — `main_domains.status` single write path (ADR-0002 D2):**
+All status mutations MUST go through
+`internal/domain.Service.Transition(ctx, id, from, to, reason, triggeredBy)`.
+This method runs entirely inside one Postgres transaction:
+
+1. `SELECT status FROM main_domains WHERE id = $1 FOR UPDATE`
+2. Assert `current == from` → otherwise `ErrStatusRaceCondition`
+3. Assert `CanTransition(from, to)` → otherwise `ErrInvalidTransition`
+4. `UPDATE main_domains SET status, updated_at = NOW()`
+5. `INSERT domain_state_history (from_status, to_status, reason, triggered_by)`
+6. `COMMIT`
+
+No other package (`internal/release`, `internal/switcher`, `internal/pool`,
+`internal/domain/deployer.go`, probe-triggered handlers) may write a status
+change by any other means. This is mechanically enforced at review time via
+`grep -r 'UPDATE main_domains SET status' --include='*.go'`, which must
+return exactly one hit inside `store/postgres/domain.go::updateStatusTx`.
+
+**Rule — `prefix_rules` are soft-frozen after use (ADR-0002 D3):**
+Once any `subdomains` row references a `prefix_rules` row, the rule's
+runtime-affecting fields (`dns_provider`, `cdn_provider`, `nginx_template`,
+`html_template`) cannot be edited in isolation. An `UPDATE prefix_rules`
+request that changes any of these fields MUST be accompanied by a rebuild
+release (`releases.kind = 'rebuild'`) that re-renders and redeploys all
+affected subdomains through the standard canary pipeline. The service layer
+rejects edit-only requests with HTTP 409 `prefix_rule_drift_requires_rebuild`.
+
+The rebuild release:
+1. Creates a `releases` row with `kind='rebuild'`, populated with the set of
+   affected subdomains
+2. Updates `subdomains` rows AND the `prefix_rules` row inside the same
+   transaction — reads see the new values immediately
+3. Dispatches domain tasks (render → svn → reload → verify) through the
+   normal release pipeline, honouring canary + shard semantics
+4. On canary failure, operator chooses rollback (restore old values from
+   `conf_snapshots`) or roll forward (fix and retry)
+
+See `DEVELOPMENT_PLAYBOOK.md §7` for the exact implementation sequence.
+
 ### 2.2 DNS/CDN Automation (pkg/provider)
 
 - Unified interface abstracting 5 CDN + 4 DNS vendors
@@ -53,10 +92,52 @@ Project-level ALWAYS wins.
 do not support 60s TTL (e.g. some free-tier plans) must be flagged in their adapter and
 rejected at provider registration time.
 
+**Rule — CDN `CloneConfig` MUST be idempotent (ADR-0002 D4):** Every
+`cdn.Provider.CloneConfig(ctx, src, dst)` implementation must converge to
+the same final state whether called once or N times with the same arguments:
+
+- If `dst` does not exist on the vendor side: create + copy + return
+- If `dst` exists with identical config: return nil (success, no-op)
+- If `dst` exists with different config: overwrite or delete-then-recreate
+- Partial-failure states (destination created but cert not attached, origin
+  not yet set, etc.) MUST be self-healing on retry
+
+Providers that cannot detect "destination exists with what config" via their
+API MUST emulate it with `GetDomainStatus + ListRules` before `CloneConfig`.
+Providers that cannot meet this requirement at all MUST declare themselves
+non-idempotent at registration time; the registry will reject them for use
+in the auto-switch path. Every CDN provider implementation requires a unit
+test `TestCloneConfig_Idempotent` that calls `CloneConfig` twice against a
+mock server and asserts identical final state.
+
+**Why idempotency is non-optional**: asynq retries `switch:execute` up to 3
+times. A half-succeeded `CloneConfig` that cannot be completed on retry
+burns all 3 attempts, escalates to P0, and leaves the destination CDN in a
+state only manual vendor-console cleanup can fix — during an incident.
+
 **Provider implementation priority:**
 - P0: Cloudflare (DNS+CDN), Alibaba Cloud (DNS+CDN)
 - P1: Tencent Cloud (DNS+CDN), GoDaddy (DNS)
 - P2: Huawei Cloud (DNS+CDN), Self-hosted CDN
+
+**asynq queue layout (ADR-0002 D5, canonical):**
+
+| Queue | Tasks | Priority weight | Concurrency |
+|-------|-------|-----------------|-------------|
+| `critical` | `switch:execute`, `probe:verify` | 10 | 20 |
+| `dns` | `dns:*` | 6 | 10 |
+| `cdn` | `cdn:*` | 6 | 10 |
+| `deploy` | `svn:*`, `agent:*`, `nginx:*` | 4 | 5 (serial per server) |
+| `default` | `template:*`, `pool:*` | 2 | 10 |
+
+`strict: false` — weighted priority, not strict priority. Strict priority
+would starve pool warmup under sustained DNS load. The `critical` queue
+exists specifically so auto-switch can preempt routine DNS work even when
+DNS API quota is saturated; this is load-bearing for the auto-switch SLA.
+
+Every task payload struct MUST include `DomainTaskID int64` for progress
+tracking to DB. `cmd/worker/main.go::asynq.Config.Queues` is the only
+place this layout is configured in code.
 
 ### 2.3 Release Subsystem (internal/release)
 
@@ -163,23 +244,54 @@ Probe Receiver (境外)
 
 **Auto-switch flow (P1 trigger):**
 ```
+0. Acquire switch lock (ADR-0002 D1):
+   a. Redis fast path:   SET switch:lock:{main_domain_id} <worker_id> NX PX 600000
+      If SETNX fails → another worker already switching → return immediately.
+      If Redis unreachable → log warning, continue to step (b).
+   b. Postgres row lock (authoritative):
+      BEGIN;
+      SELECT id, status FROM main_domains WHERE id = $1 FOR UPDATE;
+      Validate CanTransition(current_status, 'switching').
+      If Postgres unreachable → ABORT the switch (no fallback; PG is ground truth).
+   Release order on success: DEL the Redis key, then COMMIT the PG tx.
+   If the process crashes between DEL and COMMIT, the Redis TTL cleans up the orphan.
+
 1. Send alert (Telegram + Webhook)
 2. Pause all pending releases for this domain's project
-3. Select highest-priority standby domain from pool
+3. Select highest-priority ready domain from pool (pool.status = 'ready')
 4. DNS migration: delete old CNAMEs, create new CNAMEs
 5. CDN migration: clone config from old domain to new domain
+   (CloneConfig is idempotent per §2.2 rule; safe to asynq-retry)
 6. Re-render nginx conf with new main domain (prefixes unchanged)
 7. SVN commit + Agent deploy
 8. Wait 30-60s for DNS TTL + CDN propagation (this assumes all managed CNAME TTLs are 60s — see §2.2 rule)
 9. Probe verification from ≥ majority of active CN probe nodes (Phase 1: ≥ 2 of 3; Phase 2: ≥ 4 of 6)
-10. Update DB: old domain → blocked, new domain → active
+10. State transitions (all via domain.Service.Transition(), per §2.1 rule):
+    - old main_domain: 'switching' → 'blocked' (reason='gfw_blocked', triggeredBy='switcher')
+    - new main_domain: created in 'deploying' at step 4, → 'active' here
+    - pool row for new domain: 'ready' → 'promoted' via pool.Service.OnSwitchCommitted()
 ```
 
 Each step has rollback logic. If step N fails, steps 1..N-1 are reversed.
+The switch lock is held for the entire cycle; the hard ceiling is the
+Redis key TTL (600s = 10min), which also bounds the maximum duration a
+`SELECT ... FOR UPDATE` row lock can be held.
 
 ### 2.6 Standby Pool (internal/pool)
 
-**Lifecycle:** `pending → warming → ready → promoted → blocked → retired`
+**Lifecycle:**
+```
+pending ──→ warming ──→ ready ──→ promoted
+   ▲           │          │          │
+   │           ▼          ▼          ▼
+   └─────── pending                blocked
+          (retry w/                   │
+        backoff)            ┌─────────┴─────────┐
+                            ▼                   ▼
+                        retired              pending
+                       (terminal)         (operator un-block,
+                                           re-enter warming)
+```
 
 > Naming is deliberately distinct from the main-domain state machine in CLAUDE.md so that
 > `pool.status = ready` is never confused with `main_domain.status = active`, and
@@ -192,7 +304,35 @@ Each step has rollback logic. If step N fails, steps 1..N-1 are reversed.
 3. Create CDN configurations for all prefixes
 4. Wait for DNS + CDN propagation
 5. Verify reachability from ≥ majority of active CN probe nodes (Phase 1: ≥ 2 of 3; Phase 2: ≥ 4 of 6)
-6. ALL required checks pass → status = `ready`. ANY fail → status = `pending`, alert, retry with backoff.
+6. ALL required checks pass → status = `ready`. ANY fail → status = `pending`, `warmup_attempts++`, `warmup_last_error = <reason>`, exponential-backoff retry (1min, 5min, 15min). After the third failure, auto-retry stops and operator re-queue is required.
+
+**Promotion (`ready → promoted`):**
+- Invoked by `internal/switcher` on successful switch completion
+- Calls `pool.Service.OnSwitchCommitted(poolRowID)` atomically with the
+  `domain.Service.Transition(newMainDomain, 'deploying' → 'active')` write
+
+**Post-promotion lifecycle (ADR-0002 D6):**
+
+After promotion, the pool row mirrors the state of its corresponding
+`main_domains` row:
+
+- `promoted → blocked`: the switcher detects that the promoted domain is
+  itself now blocked. Invoked via `pool.Service.OnMainDomainBlocked(poolRowID)`
+  from the P1 trigger handler, atomically with the main_domain Transition
+  into `'blocked'`.
+- `blocked → retired`: terminal. Operator decision via
+  `pool.Service.Retire(poolRowID, reason)`. The `(project_id, domain)`
+  string is effectively burned — `uq_pool_domain` prevents re-insertion.
+- `blocked → pending`: operator un-block via `pool.Service.Unblock(poolRowID)`.
+  Resets `warmup_attempts = 0`, clears `warmup_last_error`, and the row
+  re-enters the normal `pending → warming → ready` flow. Used when the
+  block was transient (DNS provider outage, temporary upstream issue) and
+  operators want to reuse the domain.
+
+**Invariant**: For every `pool.status = 'promoted'` row, there is exactly
+one `main_domains` row with `main_domains.domain = pool.domain` and
+`main_domains.status NOT IN ('retired')`. The switcher is responsible for
+maintaining this invariant on every promote/block/retire operation.
 
 **Pool thresholds (counted over `status = ready` only):**
 - Normal projects: alert at < 2 remaining
@@ -280,9 +420,13 @@ TTL: 3600s (same status won't re-alert within 1 hour)
 reload:buffer:{server_id} → SET of domain_task_ids
 TTL: 60s (auto-flush if not manually triggered)
 
-# Auto-switch distributed lock — prevents two workers from switching the same domain
+# Auto-switch distributed lock — fast path (ADR-0002 D1)
+# This key is the FAST path only. Postgres `SELECT ... FOR UPDATE` on
+# main_domains is the authoritative lock. Redis loss must NOT enable
+# double switching — see §2.5 auto-switch flow step 0.
 switch:lock:{main_domain_id} → worker_id
-TTL: 600s (hard ceiling for a full switch cycle)
+TTL: 600s (hard ceiling for a full switch cycle; also bounds the maximum
+       time the Postgres row lock can be held)
 
 # Release pause flag — set by P0/P1 auto-pause, read by release scheduler
 release:pause:{project_id} → reason_code
