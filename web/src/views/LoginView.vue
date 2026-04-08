@@ -61,24 +61,30 @@ async function handleSubmit() {
 <template>
   <div class="login-root">
 
-    <!-- Background decoration -->
-    <div class="bg-grid" />
-    <div class="bg-glow bg-glow--tl" />
-    <div class="bg-glow bg-glow--br" />
+    <!-- Soft background shapes -->
+    <div class="bg-blob bg-blob--a" />
+    <div class="bg-blob bg-blob--b" />
+    <div class="bg-blob bg-blob--c" />
 
     <!-- Card -->
     <div class="login-card">
 
       <!-- Brand -->
       <div class="brand">
-        <img src="/logo.svg" width="64" height="64" alt="Domain Platform logo" class="brand__logo" />
+        <div class="brand__icon">
+          <img src="/logo.svg" width="36" height="36" alt="Domain Platform logo" />
+        </div>
         <div class="brand__text">
           <h1 class="brand__title">Domain Platform</h1>
           <p class="brand__subtitle">域名全生命週期管理平台</p>
         </div>
       </div>
 
-      <div class="divider" />
+      <!-- Heading -->
+      <div class="card-heading">
+        <h2 class="card-heading__title">歡迎回來</h2>
+        <p class="card-heading__desc">請登入您的帳號繼續操作</p>
+      </div>
 
       <!-- Form -->
       <NForm
@@ -92,7 +98,7 @@ async function handleSubmit() {
         <NFormItem path="email">
           <NInput
             v-model:value="model.email"
-            placeholder="Email 帳號"
+            placeholder="電子郵件"
             :input-props="{ type: 'email', autocomplete: 'email' }"
             :status="hasError ? 'error' : undefined"
             @input="clearError"
@@ -167,7 +173,7 @@ async function handleSubmit() {
 
       <!-- Footer -->
       <p class="card-footer">
-        Domain Lifecycle Management Platform &nbsp;·&nbsp; v0.1.0
+        Domain Lifecycle Management &nbsp;·&nbsp; v0.1.0
       </p>
     </div>
 
@@ -186,36 +192,34 @@ async function handleSubmit() {
   overflow: hidden;
 }
 
-/* Dot-grid background */
-.bg-grid {
-  position: absolute;
-  inset: 0;
-  background-image: radial-gradient(circle, #334155 1px, transparent 1px);
-  background-size: 28px 28px;
-  opacity: 0.35;
-  pointer-events: none;
-}
-
-/* Ambient colour glow */
-.bg-glow {
+/* ── Background blobs — soft, diffused colour washes ─────────────────────── */
+.bg-blob {
   position: absolute;
   border-radius: 50%;
-  filter: blur(88px);
   pointer-events: none;
+  filter: blur(72px);
+  opacity: 0.55;
 }
-.bg-glow--tl {
-  width: 520px;
-  height: 520px;
-  top:  -180px;
-  left: -180px;
-  background: radial-gradient(circle, rgba(56, 189, 248, 0.13) 0%, transparent 70%);
+.bg-blob--a {
+  width: 560px;
+  height: 560px;
+  top:  -200px;
+  left: -160px;
+  background: radial-gradient(circle, rgba(147, 197, 253, 0.55) 0%, transparent 70%);
 }
-.bg-glow--br {
-  width: 420px;
-  height: 420px;
-  bottom: -130px;
-  right:  -130px;
-  background: radial-gradient(circle, rgba(192, 132, 252, 0.10) 0%, transparent 70%);
+.bg-blob--b {
+  width: 480px;
+  height: 480px;
+  bottom: -160px;
+  right:  -140px;
+  background: radial-gradient(circle, rgba(196, 181, 253, 0.40) 0%, transparent 70%);
+}
+.bg-blob--c {
+  width: 320px;
+  height: 320px;
+  top: 40%;
+  left: 55%;
+  background: radial-gradient(circle, rgba(167, 243, 208, 0.30) 0%, transparent 70%);
 }
 
 /* ── Card ─────────────────────────────────────────────────────────────────── */
@@ -223,54 +227,75 @@ async function handleSubmit() {
   position: relative;
   z-index: 1;
   width: 400px;
-  padding: 40px 36px 32px;
+  padding: 36px 40px 32px;
   background-color: var(--bg-card);
   border: 1px solid var(--border);
-  border-radius: 14px;
+  border-radius: 16px;
   box-shadow:
-    0 0 0 1px rgba(56, 189, 248, 0.05),
-    0 8px 32px rgba(0, 0, 0, 0.40),
-    0 32px 64px rgba(0, 0, 0, 0.30);
+    0 0 0 1px rgba(79, 126, 248, 0.06),
+    0 4px 16px rgba(15, 23, 42, 0.08),
+    0 16px 48px rgba(15, 23, 42, 0.08);
 }
 
 /* ── Brand ────────────────────────────────────────────────────────────────── */
 .brand {
   display: flex;
   align-items: center;
-  gap: 16px;
+  gap: 12px;
   margin-bottom: 28px;
 }
 
-.brand__logo {
+.brand__icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 48px;
+  height: 48px;
+  background: linear-gradient(135deg, #eff6ff 0%, #e0f2fe 100%);
+  border: 1px solid rgba(79, 126, 248, 0.15);
+  border-radius: 12px;
   flex-shrink: 0;
-  border-radius: 14px;
 }
 
 .brand__text {
   display: flex;
   flex-direction: column;
-  gap: 5px;
+  gap: 3px;
 }
 
 .brand__title {
-  font-size: 20px;
+  font-size: 17px;
   font-weight: 700;
   color: var(--text-primary);
-  letter-spacing: -0.3px;
+  letter-spacing: -0.2px;
   line-height: 1.2;
 }
 
 .brand__subtitle {
   font-size: 12px;
   color: var(--text-muted);
-  letter-spacing: 0.2px;
+  letter-spacing: 0.1px;
 }
 
-/* ── Divider ──────────────────────────────────────────────────────────────── */
-.divider {
-  height: 1px;
-  background: linear-gradient(to right, transparent, var(--border) 30%, var(--border) 70%, transparent);
-  margin-bottom: 28px;
+/* ── Card heading ─────────────────────────────────────────────────────────── */
+.card-heading {
+  margin-bottom: 24px;
+  padding-bottom: 24px;
+  border-bottom: 1px solid var(--border-sub);
+}
+
+.card-heading__title {
+  font-size: 22px;
+  font-weight: 700;
+  color: var(--text-primary);
+  letter-spacing: -0.4px;
+  line-height: 1.2;
+}
+
+.card-heading__desc {
+  margin-top: 6px;
+  font-size: 14px;
+  color: var(--text-muted);
 }
 
 /* ── Field icons ──────────────────────────────────────────────────────────── */
@@ -292,11 +317,11 @@ async function handleSubmit() {
   gap: 7px;
   padding: 10px 12px;
   margin-bottom: 14px;
-  background-color: rgba(239, 68, 68, 0.10);
-  border: 1px solid rgba(239, 68, 68, 0.28);
-  border-radius: 6px;
+  background-color: rgba(220, 38, 38, 0.06);
+  border: 1px solid rgba(220, 38, 38, 0.20);
+  border-radius: 8px;
   font-size: 13px;
-  color: #f87171;
+  color: #dc2626;
   line-height: 1.5;
 }
 
@@ -306,19 +331,19 @@ async function handleSubmit() {
   height: 44px !important;
   font-size: 15px !important;
   font-weight: 600 !important;
-  letter-spacing: 0.5px;
+  letter-spacing: 0.3px;
 }
 
 /* ── Footer ───────────────────────────────────────────────────────────────── */
 .card-footer {
-  margin-top: 22px;
+  margin-top: 20px;
   text-align: center;
-  font-size: 11px;
+  font-size: 12px;
   color: var(--text-muted);
-  letter-spacing: 0.3px;
+  letter-spacing: 0.2px;
 }
 
 /* ── Error transition ─────────────────────────────────────────────────────── */
 .err-enter-active, .err-leave-active { transition: all 0.2s ease; }
-.err-enter-from,  .err-leave-to     { opacity: 0; transform: translateY(-6px); }
+.err-enter-from,  .err-leave-to     { opacity: 0; transform: translateY(-4px); }
 </style>

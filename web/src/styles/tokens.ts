@@ -1,6 +1,8 @@
 /**
  * Design Tokens — Single source of truth for all visual values.
  *
+ * Theme: Soft Light — comfortable, elegant, fresh.
+ *
  * Rules:
  *  - NEVER hardcode a color/spacing/font-size in a component.
  *  - ALWAYS use a value from this file or the corresponding CSS variable.
@@ -11,45 +13,46 @@
 
 export const colors = {
   // Backgrounds
-  bgPage:    '#0f172a',  // page root background
-  bgCard:    '#1e293b',  // card, table, modal surface
-  bgInput:   '#0f172a',  // input, select background
-  bgHover:   'rgba(56, 189, 248, 0.06)',  // row hover
+  bgPage:    '#f0f4f8',  // page root — soft blue-gray wash
+  bgCard:    '#ffffff',  // card, table, modal surface
+  bgInput:   '#f8fafc',  // input, select background
+  bgHover:   'rgba(79, 126, 248, 0.05)',  // row hover — barely-there blue tint
+  bgSidebar: '#ffffff',  // sidebar surface
 
   // Borders & dividers
-  border:    '#334155',
-  borderSub: '#1e293b',  // subtler divider inside cards
+  border:    '#e4e9f2',
+  borderSub: '#f1f5fb',  // subtler divider inside cards
 
   // Text
-  textPrimary:   '#f1f5f9',
-  textSecondary: '#94a3b8',
-  textMuted:     '#64748b',
+  textPrimary:   '#1a2233',
+  textSecondary: '#4b5a6e',
+  textMuted:     '#8b97a8',
 
   // Brand / primary
-  primary:        '#38bdf8',
-  primaryHover:   '#7dd3fc',
-  primaryPressed: '#0ea5e9',
+  primary:        '#4f7ef8',  // clear sky blue — confident, approachable
+  primaryHover:   '#3b6ef0',
+  primaryPressed: '#2c5de0',
 
-  // Domain status
+  // Domain status — muted for light backgrounds
   status: {
-    inactive:  { color: '#64748b', bg: 'rgba(100,116,139,0.12)' },
-    deploying: { color: '#fbbf24', bg: 'rgba(251,191,36,0.12)'  },
-    active:    { color: '#4ade80', bg: 'rgba(74,222,128,0.12)'  },
-    degraded:  { color: '#fb923c', bg: 'rgba(251,146,60,0.12)'  },
-    switching: { color: '#c084fc', bg: 'rgba(192,132,252,0.12)' },
-    suspended: { color: '#facc15', bg: 'rgba(250,204,21,0.12)'  },
-    failed:    { color: '#f87171', bg: 'rgba(248,113,113,0.12)' },
-    blocked:   { color: '#ef4444', bg: 'rgba(239,68,68,0.12)'   },
-    retired:   { color: '#475569', bg: 'rgba(71,85,105,0.12)'   },
+    inactive:  { color: '#64748b', bg: 'rgba(100,116,139,0.08)' },
+    deploying: { color: '#d97706', bg: 'rgba(217,119,6,0.08)'   },
+    active:    { color: '#16a34a', bg: 'rgba(22,163,74,0.08)'   },
+    degraded:  { color: '#ea580c', bg: 'rgba(234,88,12,0.08)'   },
+    switching: { color: '#7c3aed', bg: 'rgba(124,58,237,0.08)'  },
+    suspended: { color: '#b45309', bg: 'rgba(180,83,9,0.08)'    },
+    failed:    { color: '#dc2626', bg: 'rgba(220,38,38,0.08)'   },
+    blocked:   { color: '#dc2626', bg: 'rgba(220,38,38,0.08)'   },
+    retired:   { color: '#94a3b8', bg: 'rgba(148,163,184,0.08)' },
   },
 
-  // Alert severity
+  // Alert severity — crisp but not glaring
   severity: {
-    P0:   { color: '#ef4444', bg: 'rgba(239,68,68,0.12)'   },
-    P1:   { color: '#f97316', bg: 'rgba(249,115,22,0.12)'  },
-    P2:   { color: '#eab308', bg: 'rgba(234,179,8,0.12)'   },
-    P3:   { color: '#60a5fa', bg: 'rgba(96,165,250,0.12)'  },
-    INFO: { color: '#4ade80', bg: 'rgba(74,222,128,0.12)'  },
+    P0:   { color: '#dc2626', bg: 'rgba(220,38,38,0.08)'   },
+    P1:   { color: '#ea580c', bg: 'rgba(234,88,12,0.08)'   },
+    P2:   { color: '#d97706', bg: 'rgba(217,119,6,0.08)'   },
+    P3:   { color: '#2563eb', bg: 'rgba(37,99,235,0.08)'   },
+    INFO: { color: '#16a34a', bg: 'rgba(22,163,74,0.08)'   },
   },
 } as const
 
@@ -81,16 +84,16 @@ export const fontSize = {
 } as const
 
 export const fontWeight = {
-  normal:  400,
-  medium:  500,
-  semibold:600,
-  bold:    700,
+  normal:   400,
+  medium:   500,
+  semibold: 600,
+  bold:     700,
 } as const
 
 export const lineHeight = {
-  tight:  1.3,
-  normal: 1.5,
-  relaxed:1.6,
+  tight:   1.3,
+  normal:  1.5,
+  relaxed: 1.6,
 } as const
 
 // ── Borders ─────────────────────────────────────────────────────────────────
@@ -103,12 +106,13 @@ export const borderRadius = {
   full: '9999px',
 } as const
 
-// ── Shadows ─────────────────────────────────────────────────────────────────
+// ── Shadows — light, layered, modern ─────────────────────────────────────────
 
 export const shadow = {
-  card:  '0 1px 3px rgba(0,0,0,0.4), 0 1px 2px rgba(0,0,0,0.3)',
-  modal: '0 20px 60px rgba(0,0,0,0.6)',
-  glow:  '0 0 0 2px rgba(56,189,248,0.35)',
+  xs:    '0 1px 2px rgba(15,23,42,0.04)',
+  card:  '0 1px 3px rgba(15,23,42,0.06), 0 4px 12px rgba(15,23,42,0.06)',
+  modal: '0 8px 40px rgba(15,23,42,0.14), 0 2px 8px rgba(15,23,42,0.08)',
+  glow:  '0 0 0 3px rgba(79,126,248,0.18)',
 } as const
 
 // ── Layout constants ─────────────────────────────────────────────────────────
@@ -124,6 +128,7 @@ export const layout = {
 } as const
 
 // ── Naive UI theme overrides (imported in App.vue) ──────────────────────────
+// Light theme — do NOT pass darkTheme in App.vue
 
 import type { GlobalThemeOverrides } from 'naive-ui'
 
@@ -134,25 +139,74 @@ export const naiveThemeOverrides: GlobalThemeOverrides = {
     primaryColorPressed: colors.primaryPressed,
     primaryColorSuppl:   colors.primaryPressed,
 
-    bodyColor:        colors.bgPage,
-    cardColor:        colors.bgCard,
-    modalColor:       colors.bgCard,
-    popoverColor:     '#263147',
-    tableColor:       colors.bgCard,
-    tableColorHover:  colors.bgHover,
-    tableHeaderColor: colors.bgPage,
-    inputColor:       colors.bgInput,
-    inputColorDisabled:'#1e293b',
+    bodyColor:          colors.bgPage,
+    cardColor:          colors.bgCard,
+    modalColor:         colors.bgCard,
+    popoverColor:       colors.bgCard,
+    tableColor:         colors.bgCard,
+    tableColorHover:    colors.bgHover,
+    tableHeaderColor:   '#f8fafc',
+    inputColor:         colors.bgInput,
+    inputColorDisabled: '#f1f5f9',
 
     borderColor:   colors.border,
     dividerColor:  colors.border,
 
     textColorBase: colors.textPrimary,
     textColor1:    colors.textPrimary,
-    textColor2:    '#cbd5e1',
-    textColor3:    colors.textSecondary,
-    placeholderColor:     colors.textMuted,
-    scrollbarColor:       colors.border,
-    scrollbarColorHover:  '#475569',
+    textColor2:    colors.textSecondary,
+    textColor3:    colors.textMuted,
+    placeholderColor:    colors.textMuted,
+    scrollbarColor:      '#d1d9e6',
+    scrollbarColorHover: '#aab5c8',
+
+    fontFamily: "system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', sans-serif",
+    fontSize:   '14px',
+    borderRadius: '8px',
+  },
+  Button: {
+    borderRadiusMedium: '8px',
+    borderRadiusLarge:  '8px',
+    borderRadiusSmall:  '6px',
+    fontWeightStrong:   '600',
+  },
+  Input: {
+    borderRadius: '8px',
+    color:        colors.bgInput,
+    colorFocus:   colors.bgCard,
+    border:       `1px solid ${colors.border}`,
+    borderHover:  `1px solid ${colors.primary}`,
+    borderFocus:  `1px solid ${colors.primary}`,
+    boxShadowFocus: `0 0 0 3px rgba(79,126,248,0.15)`,
+  },
+  Select: {
+    peers: {
+      InternalSelection: {
+        borderRadius: '8px',
+        border:       `1px solid ${colors.border}`,
+        borderHover:  `1px solid ${colors.primary}`,
+        borderFocus:  `1px solid ${colors.primary}`,
+        boxShadowFocus: `0 0 0 3px rgba(79,126,248,0.15)`,
+      },
+    },
+  },
+  DataTable: {
+    thPaddingMedium:    '0 16px',
+    tdPaddingMedium:    '0 16px',
+    thFontWeight:       '600',
+    thTextColor:        colors.textMuted,
+    borderRadius:       '10px',
+  },
+  Card: {
+    borderRadius: '12px',
+    boxShadow:    shadow.card,
+    paddingMedium:'20px 24px',
+  },
+  Modal: {
+    borderRadius: '14px',
+    boxShadow:    shadow.modal,
+  },
+  Tag: {
+    borderRadius: '6px',
   },
 }
