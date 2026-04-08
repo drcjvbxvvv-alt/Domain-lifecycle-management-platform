@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { NConfigProvider, NGlobalStyle, darkTheme } from 'naive-ui'
+import { NConfigProvider, NGlobalStyle, NMessageProvider, NDialogProvider, NNotificationProvider, darkTheme } from 'naive-ui'
 import { RouterView } from 'vue-router'
 import { naiveThemeOverrides } from '@/styles/tokens'
 </script>
@@ -7,6 +7,12 @@ import { naiveThemeOverrides } from '@/styles/tokens'
 <template>
   <NConfigProvider :theme="darkTheme" :theme-overrides="naiveThemeOverrides">
     <NGlobalStyle />
-    <RouterView />
+    <NMessageProvider>
+      <NDialogProvider>
+        <NNotificationProvider>
+          <RouterView />
+        </NNotificationProvider>
+      </NDialogProvider>
+    </NMessageProvider>
   </NConfigProvider>
 </template>
