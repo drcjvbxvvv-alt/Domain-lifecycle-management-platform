@@ -69,21 +69,16 @@ async function handleSubmit() {
     <!-- Card -->
     <div class="login-card">
 
-      <!-- Brand -->
+      <!-- Brand + Heading (centered) -->
       <div class="brand">
         <div class="brand__icon">
-          <img src="/logo.svg" width="36" height="36" alt="Domain Platform logo" />
+          <img src="/logo.svg" width="40" height="40" alt="Domain Platform logo" />
         </div>
-        <div class="brand__text">
-          <h1 class="brand__title">Domain Platform</h1>
-          <p class="brand__subtitle">域名全生命週期管理平台</p>
-        </div>
-      </div>
-
-      <!-- Heading -->
-      <div class="card-heading">
-        <h2 class="card-heading__title">歡迎回來</h2>
-        <p class="card-heading__desc">請登入您的帳號繼續操作</p>
+        <h1 class="brand__title">Domain Platform</h1>
+        <p class="brand__subtitle">域名全生命週期管理平台</p>
+        <div class="brand__divider" />
+        <h2 class="brand__welcome">歡迎回來</h2>
+        <p class="brand__desc">請登入您的帳號繼續操作</p>
       </div>
 
       <!-- Form -->
@@ -237,63 +232,63 @@ async function handleSubmit() {
     0 16px 48px rgba(15, 23, 42, 0.08);
 }
 
-/* ── Brand ────────────────────────────────────────────────────────────────── */
+/* ── Brand + heading block (all centered) ─────────────────────────────────── */
 .brand {
   display: flex;
+  flex-direction: column;
   align-items: center;
-  gap: 12px;
+  text-align: center;
+  gap: 0;
   margin-bottom: 28px;
+  padding-bottom: 28px;
+  border-bottom: 1px solid var(--border-sub);
 }
 
 .brand__icon {
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 48px;
-  height: 48px;
-  background: linear-gradient(135deg, #eff6ff 0%, #e0f2fe 100%);
-  border: 1px solid rgba(79, 126, 248, 0.15);
-  border-radius: 12px;
-  flex-shrink: 0;
-}
-
-.brand__text {
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
+  width: 64px;
+  height: 64px;
+  background: linear-gradient(145deg, #eff6ff 0%, #dbeafe 50%, #e0f2fe 100%);
+  border: 1px solid rgba(79, 126, 248, 0.18);
+  border-radius: 18px;
+  box-shadow: 0 2px 8px rgba(79, 126, 248, 0.12);
+  margin-bottom: 14px;
 }
 
 .brand__title {
-  font-size: 17px;
+  font-size: 18px;
   font-weight: 700;
   color: var(--text-primary);
-  letter-spacing: -0.2px;
+  letter-spacing: -0.3px;
   line-height: 1.2;
+  margin-bottom: 4px;
 }
 
 .brand__subtitle {
   font-size: 12px;
   color: var(--text-muted);
-  letter-spacing: 0.1px;
+  letter-spacing: 0.2px;
 }
 
-/* ── Card heading ─────────────────────────────────────────────────────────── */
-.card-heading {
-  margin-bottom: 24px;
-  padding-bottom: 24px;
-  border-bottom: 1px solid var(--border-sub);
+.brand__divider {
+  width: 32px;
+  height: 1px;
+  background: var(--border);
+  margin: 20px 0 18px;
 }
 
-.card-heading__title {
+.brand__welcome {
   font-size: 22px;
   font-weight: 700;
   color: var(--text-primary);
   letter-spacing: -0.4px;
   line-height: 1.2;
+  margin-bottom: 6px;
 }
 
-.card-heading__desc {
-  margin-top: 6px;
+.brand__desc {
   font-size: 14px;
   color: var(--text-muted);
 }
