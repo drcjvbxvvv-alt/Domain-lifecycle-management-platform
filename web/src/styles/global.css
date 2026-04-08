@@ -1,0 +1,129 @@
+/* ─────────────────────────────────────────────────────────────────────────────
+   Global CSS — CSS custom properties mirroring tokens.ts
+   Rules:
+     - Components use var(--xxx) for styling; never hardcode hex values.
+     - Adding a token here MUST have a corresponding entry in tokens.ts.
+   ───────────────────────────────────────────────────────────────────────────── */
+
+:root {
+  /* Backgrounds */
+  --bg-page:    #0f172a;
+  --bg-card:    #1e293b;
+  --bg-input:   #0f172a;
+  --bg-hover:   rgba(56, 189, 248, 0.06);
+
+  /* Borders */
+  --border:     #334155;
+  --border-sub: #1e293b;
+
+  /* Text */
+  --text-primary:   #f1f5f9;
+  --text-secondary: #94a3b8;
+  --text-muted:     #64748b;
+
+  /* Brand */
+  --primary:          #38bdf8;
+  --primary-hover:    #7dd3fc;
+  --primary-pressed:  #0ea5e9;
+
+  /* Domain status */
+  --status-inactive-color:  #64748b;
+  --status-inactive-bg:     rgba(100, 116, 139, 0.12);
+  --status-deploying-color: #fbbf24;
+  --status-deploying-bg:    rgba(251, 191, 36,  0.12);
+  --status-active-color:    #4ade80;
+  --status-active-bg:       rgba(74,  222, 128, 0.12);
+  --status-degraded-color:  #fb923c;
+  --status-degraded-bg:     rgba(251, 146, 60,  0.12);
+  --status-switching-color: #c084fc;
+  --status-switching-bg:    rgba(192, 132, 252, 0.12);
+  --status-suspended-color: #facc15;
+  --status-suspended-bg:    rgba(250, 204, 21,  0.12);
+  --status-failed-color:    #f87171;
+  --status-failed-bg:       rgba(248, 113, 113, 0.12);
+  --status-blocked-color:   #ef4444;
+  --status-blocked-bg:      rgba(239, 68,  68,  0.12);
+  --status-retired-color:   #475569;
+  --status-retired-bg:      rgba(71,  85,  105, 0.12);
+
+  /* Alert severity */
+  --severity-p0-color:   #ef4444;
+  --severity-p0-bg:      rgba(239, 68,  68,  0.12);
+  --severity-p1-color:   #f97316;
+  --severity-p1-bg:      rgba(249, 115, 22,  0.12);
+  --severity-p2-color:   #eab308;
+  --severity-p2-bg:      rgba(234, 179, 8,   0.12);
+  --severity-p3-color:   #60a5fa;
+  --severity-p3-bg:      rgba(96,  165, 250, 0.12);
+  --severity-info-color: #4ade80;
+  --severity-info-bg:    rgba(74,  222, 128, 0.12);
+
+  /* Spacing */
+  --space-1:  4px;
+  --space-2:  8px;
+  --space-3:  12px;
+  --space-4:  16px;
+  --space-5:  20px;
+  --space-6:  24px;
+  --space-8:  32px;
+  --space-10: 40px;
+  --space-12: 48px;
+  --space-16: 64px;
+
+  /* Layout */
+  --sidebar-width:       220px;
+  --header-height:       56px;
+  --page-header-height:  64px;
+  --table-row-height:    48px;
+  --search-bar-height:   52px;
+  --content-padding:     24px;
+}
+
+/* ── Reset ────────────────────────────────────────────────────────────────── */
+
+*, *::before, *::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html, body {
+  height: 100%;
+  font-family: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  font-size: 14px;
+  line-height: 1.5;
+  color: var(--text-primary);
+  background-color: var(--bg-page);
+  -webkit-font-smoothing: antialiased;
+}
+
+#app {
+  height: 100%;
+}
+
+/* ── Scrollbar ────────────────────────────────────────────────────────────── */
+
+::-webkit-scrollbar        { width: 6px; height: 6px; }
+::-webkit-scrollbar-track  { background: transparent; }
+::-webkit-scrollbar-thumb  { background: var(--border); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: #475569; }
+
+/* ── Utility classes ──────────────────────────────────────────────────────── */
+
+.text-primary   { color: var(--text-primary); }
+.text-secondary { color: var(--text-secondary); }
+.text-muted     { color: var(--text-muted); }
+.text-brand     { color: var(--primary); }
+
+.truncate {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ── Page layout shell ────────────────────────────────────────────────────── */
+
+.page-content {
+  padding: var(--content-padding);
+  max-width: 1400px;
+}

@@ -1,0 +1,11 @@
+// Central export — import all shared components from '@/components'
+// Example: import { StatusTag, PageHeader, AppTable } from '@/components'
+
+export { default as StatusTag }    from './StatusTag.vue'
+export { default as SeverityTag }  from './SeverityTag.vue'
+export { default as PageHeader }   from './PageHeader.vue'
+export { default as SearchBar }    from './SearchBar.vue'
+export { default as AppTable }     from './AppTable.vue'
+export { default as EmptyState }   from './EmptyState.vue'
+export { default as ConfirmModal } from './ConfirmModal.vue'
+export { default as StatCard }     from './StatCard.vue'
