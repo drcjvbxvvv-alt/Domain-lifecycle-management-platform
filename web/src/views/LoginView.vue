@@ -17,12 +17,11 @@ const formRef = ref<FormInst | null>(null)
 const loading = ref(false)
 const showPwd = ref(false)
 
-const model = ref({ email: '', password: '' })
+const model = ref({ username: '', password: '' })
 
 const rules: FormRules = {
-  email: [
-    { required: true, message: '請輸入 Email',    trigger: 'blur' },
-    { type: 'email',  message: 'Email 格式不正確', trigger: 'blur' },
+  username: [
+    { required: true, message: '請輸入帳號', trigger: 'blur' },
   ],
   password: [
     { required: true, message: '請輸入密碼',    trigger: 'blur' },
@@ -43,7 +42,7 @@ async function handleSubmit() {
   errorMsg.value = ''
 
   try {
-    await auth.login(model.value.email, model.value.password)
+    await auth.login(model.value.username, model.value.password)
     const redirect = (route.query.redirect as string) ?? '/'
     await router.push(redirect)
     message.success('登入成功')
@@ -90,20 +89,18 @@ async function handleSubmit() {
         size="large"
         @keydown.enter="handleSubmit"
       >
-        <NFormItem path="email">
+        <NFormItem path="username">
           <NInput
-            v-model:value="model.email"
-            placeholder="電子郵件"
-            :input-props="{ type: 'email', autocomplete: 'email' }"
+            v-model:value="model.username"
+            placeholder="帳號"
+            :input-props="{ autocomplete: 'username' }"
             :status="hasError ? 'error' : undefined"
             @input="clearError"
           >
             <template #prefix>
               <svg width="15" height="15" viewBox="0 0 24 24" fill="none" class="field-icon">
-                <path d="M20 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2z"
-                      stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/>
-                <path d="M22 6l-10 7L2 6"
-                      stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+                <circle cx="12" cy="8" r="4" stroke="currentColor" stroke-width="1.8"/>
+                <path d="M4 20c0-4 3.6-7 8-7s8 3 8 7" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
               </svg>
             </template>
           </NInput>
