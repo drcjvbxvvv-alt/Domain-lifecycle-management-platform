@@ -324,6 +324,7 @@ Agent 協定端點（mTLS auth — agent 專用）：
 | `CLAUDE.md` | 編碼規範、三個狀態機、Critical Rules、tech stack |
 | `docs/CLAUDE_CODE_INSTRUCTIONS.md` | Claude Code session 入口 + Model Selection Policy |
 | `docs/PHASE1_TASKLIST.md` | **Phase 1 工作清單**（12 張任務卡，含 owner model / scope / 驗收條件） |
+| `docs/PHASE1_EFFORT.md` | **Phase 1 開發週期粗估**（每任務 Lo/Hi 工作天、風險標記、週計畫 — 非承諾，P1.3 後需重新校準） |
 | `docs/ARCHITECTURE.md` | 4 層架構、subsystem 說明、agent 協定、queue layout |
 | `docs/DATABASE_SCHEMA.md` | 完整 schema、index 策略、Phase 標記 |
 | `docs/DEVELOPMENT_PLAYBOOK.md` | API endpoint / state transition / artifact build / agent task / migration / Vue page 範本 |

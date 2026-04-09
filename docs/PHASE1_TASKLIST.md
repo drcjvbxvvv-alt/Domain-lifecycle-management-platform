@@ -941,6 +941,7 @@ GFW failover as a vertical (separate ADR).
 ## References
 
 - `CLAUDE.md` — coding standards, critical rules, state machines, project layout
+- `docs/PHASE1_EFFORT.md` — **effort estimate** (Lo/Hi work-days per task, critical path, 3 risk hotspots, week-by-week order). Rebaseline after P1.3
 - `docs/ARCHITECTURE.md` — subsystem responsibilities, agent protocol, queue layout
 - `docs/DATABASE_SCHEMA.md` — every table, every constraint
 - `docs/DEVELOPMENT_PLAYBOOK.md` — how to add endpoints / providers / tasks /

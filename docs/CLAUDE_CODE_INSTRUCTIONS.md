@@ -33,6 +33,7 @@ Read these documents in this order when starting a new task:
 |----------|-------------|---------|
 | **CLAUDE.md** | Always (should be auto-loaded) | Tech stack, project structure, coding standards, three state machines, critical rules |
 | **PHASE1_TASKLIST.md** | **First task of any Phase 1 session** | Authoritative work order for Phase 1: 12 task cards (P1.1–P1.12) with owner model, scope in/out, dependencies, acceptance criteria |
+| **PHASE1_EFFORT.md** | When planning a sprint or sanity-checking progress | Phase 1 effort estimate (Lo/Hi work-days per task, integration overhead, 3 risk hotspots, recommended week-by-week order). **Estimates, not commitments** — must be rebaselined after P1.3 lands |
 | **ARCHITECTURE.md** | When working on cross-cutting features, agent protocol, artifact pipeline, or deployment topology | 4-layer architecture, subsystem details, agent protocol, queue layout, deployment topology |
 | **DATABASE_SCHEMA.md** | When creating migrations or writing queries | Complete schema (P1-P4 tagged), index strategy, conventions |
 | **DEVELOPMENT_PLAYBOOK.md** | When implementing any feature | Step-by-step patterns: API endpoints, state transitions, providers, asynq tasks, artifact build, agent task types, probes, migrations, Vue pages |
