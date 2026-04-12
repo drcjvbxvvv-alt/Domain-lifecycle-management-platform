@@ -12,6 +12,9 @@ import (
 	"github.com/minio/minio-go/v7"
 )
 
+// Compile-time check that MinIOStorage implements Storage.
+var _ Storage = (*MinIOStorage)(nil)
+
 // MinIOStorage implements Storage backed by MinIO / S3-compatible API.
 type MinIOStorage struct {
 	client *minio.Client
@@ -111,4 +114,48 @@ func (s *MinIOStorage) Presign(ctx context.Context, key string, ttl time.Duratio
 		return "", fmt.Errorf("presign %s: %w", key, err)
 	}
 	return u.String(), nil
+}
+
+func (s *MinIOStorage) ListObjects(ctx context.Context, prefix string) ([]ObjectInfo, error) {
+	var results []ObjectInfo
+	for obj := range s.client.ListObjects(ctx, s.bucket, minio.ListObjectsOptions{
+		Prefix:    prefix,
+		Recursive: true,
+	}) {
+		if obj.Err != nil {
+			return nil, fmt.Errorf("list objects prefix=%s: %w", prefix, obj.Err)
+		}
+		results = append(results, ObjectInfo{
+			Key:          obj.Key,
+			Size:         obj.Size,
+			ContentType:  obj.ContentType,
+			ETag:         obj.ETag,
+			LastModified: obj.LastModified,
+		})
+	}
+	return results, nil
+}
+
+func (s *MinIOStorage) GetObjectContent(ctx context.Context, key string) ([]byte, error) {
+	rc, err := s.Download(ctx, key)
+	if err != nil {
+		return nil, err
+	}
+	defer rc.Close()
+
+	buf := make([]byte, 0, 64*1024)
+	tmp := make([]byte, 32*1024)
+	for {
+		n, readErr := rc.Read(tmp)
+		if n > 0 {
+			buf = append(buf, tmp[:n]...)
+		}
+		if readErr != nil {
+			if readErr == io.EOF {
+				break
+			}
+			return nil, fmt.Errorf("read object content %s: %w", key, readErr)
+		}
+	}
+	return buf, nil
 }

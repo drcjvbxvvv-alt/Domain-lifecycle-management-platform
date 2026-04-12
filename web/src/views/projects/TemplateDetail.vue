@@ -3,7 +3,7 @@ import { onMounted } from 'vue'
 import { useRoute } from 'vue-router'
 import { NTabs, NTabPane, NDescriptions, NDescriptionsItem } from 'naive-ui'
 import type { DataTableColumns } from 'naive-ui'
-import { AppTable, PageHeader } from '@/components'
+import { AppTable, PageHeader, PageHint } from '@/components'
 import { useTemplateStore } from '@/stores/template'
 import type { TemplateVersionResponse } from '@/types/template'
 
@@ -33,7 +33,15 @@ onMounted(async () => {
     <PageHeader
       :title="store.current?.name ?? '載入中...'"
       subtitle="範本詳情"
-    />
+    >
+      <template #hint>
+        <PageHint storage-key="template-detail" title="範本版本說明">
+          版本狀態：<strong>草稿</strong> 表示尚未發布（可繼續編輯）；有日期表示已發布且<strong>不可修改</strong>（Immutable）。<br>
+          建立發布時，在「Template Version ID」欄位填入此頁版本列表中的 <strong>ID 數字</strong>。<br>
+          需異動內容時請建立新版本，舊版本保持不變以支援回滾。
+        </PageHint>
+      </template>
+    </PageHeader>
 
     <div v-if="store.current" class="detail-page__body">
       <div class="detail-page__sidebar">

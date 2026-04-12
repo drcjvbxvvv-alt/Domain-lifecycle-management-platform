@@ -371,6 +371,122 @@ func (s *AgentStore) InsertDeploymentLog(ctx context.Context, agentTaskID int64,
 	return nil
 }
 
+// ── Agent task creation ──────────────────────────────────────────────────
+
+// CreateAgentTask inserts a new agent_task row.
+func (s *AgentStore) CreateAgentTask(ctx context.Context, t *AgentTask) (*AgentTask, error) {
+	var out AgentTask
+	err := s.db.QueryRowxContext(ctx,
+		`INSERT INTO agent_tasks (task_id, domain_task_id, agent_id, artifact_id, artifact_url, payload)
+		 VALUES ($1, $2, $3, $4, $5, $6)
+		 RETURNING id, uuid, task_id, domain_task_id, agent_id, artifact_id, artifact_url,
+		           payload, status, claimed_at, started_at, ended_at, duration_ms, last_error,
+		           retry_count, created_at`,
+		t.TaskID, t.DomainTaskID, t.AgentDBID, t.ArtifactID, t.ArtifactURL, t.Payload,
+	).StructScan(&out)
+	if err != nil {
+		return nil, fmt.Errorf("create agent task: %w", err)
+	}
+	return &out, nil
+}
+
+// ListAgentTasksByRelease returns all agent_tasks for a release (via domain_tasks join).
+func (s *AgentStore) ListAgentTasksByRelease(ctx context.Context, releaseID int64) ([]AgentTask, error) {
+	var items []AgentTask
+	err := s.db.SelectContext(ctx, &items,
+		`SELECT at.id, at.uuid, at.task_id, at.domain_task_id, at.agent_id, at.artifact_id,
+		        at.artifact_url, at.payload, at.status, at.claimed_at, at.started_at,
+		        at.ended_at, at.duration_ms, at.last_error, at.retry_count, at.created_at
+		 FROM agent_tasks at
+		 JOIN domain_tasks dt ON dt.id = at.domain_task_id
+		 WHERE dt.release_id = $1
+		 ORDER BY at.id`, releaseID)
+	if err != nil {
+		return nil, fmt.Errorf("list agent tasks by release: %w", err)
+	}
+	return items, nil
+}
+
+// AgentTaskStats holds aggregate counts for agent tasks.
+type AgentTaskStats struct {
+	Total     int `db:"total"`
+	Succeeded int `db:"succeeded"`
+	Failed    int `db:"failed"`
+	Pending   int `db:"pending"`
+	Claimed   int `db:"claimed"`
+	Running   int `db:"running"`
+	Timeout   int `db:"timeout"`
+}
+
+// GetAgentTaskStatsByRelease returns aggregate status counts for all agent tasks in a release.
+func (s *AgentStore) GetAgentTaskStatsByRelease(ctx context.Context, releaseID int64) (*AgentTaskStats, error) {
+	var stats AgentTaskStats
+	err := s.db.GetContext(ctx, &stats,
+		`SELECT
+			COUNT(*) AS total,
+			COUNT(*) FILTER (WHERE at.status = 'succeeded') AS succeeded,
+			COUNT(*) FILTER (WHERE at.status = 'failed') AS failed,
+			COUNT(*) FILTER (WHERE at.status = 'pending') AS pending,
+			COUNT(*) FILTER (WHERE at.status = 'claimed') AS claimed,
+			COUNT(*) FILTER (WHERE at.status = 'running') AS running,
+			COUNT(*) FILTER (WHERE at.status = 'timeout') AS timeout
+		 FROM agent_tasks at
+		 JOIN domain_tasks dt ON dt.id = at.domain_task_id
+		 WHERE dt.release_id = $1`, releaseID)
+	if err != nil {
+		return nil, fmt.Errorf("get agent task stats: %w", err)
+	}
+	return &stats, nil
+}
+
+// GetAgentTaskStatsByShard returns aggregate status counts for all agent tasks
+// belonging to domain_tasks in a specific shard.
+func (s *AgentStore) GetAgentTaskStatsByShard(ctx context.Context, shardID int64) (*AgentTaskStats, error) {
+	var stats AgentTaskStats
+	err := s.db.GetContext(ctx, &stats,
+		`SELECT
+			COUNT(*) AS total,
+			COUNT(*) FILTER (WHERE at.status = 'succeeded') AS succeeded,
+			COUNT(*) FILTER (WHERE at.status = 'failed') AS failed,
+			COUNT(*) FILTER (WHERE at.status = 'pending') AS pending,
+			COUNT(*) FILTER (WHERE at.status = 'claimed') AS claimed,
+			COUNT(*) FILTER (WHERE at.status = 'running') AS running,
+			COUNT(*) FILTER (WHERE at.status = 'timeout') AS timeout
+		 FROM agent_tasks at
+		 JOIN domain_tasks dt ON dt.id = at.domain_task_id
+		 WHERE dt.shard_id = $1`, shardID)
+	if err != nil {
+		return nil, fmt.Errorf("get agent task stats for shard %d: %w", shardID, err)
+	}
+	return &stats, nil
+}
+
+// ListOnlineByHostGroup returns agents that are online and belong to a host group.
+func (s *AgentStore) ListOnlineByHostGroup(ctx context.Context, hostGroupID int64) ([]Agent, error) {
+	var agents []Agent
+	err := s.db.SelectContext(ctx, &agents,
+		`SELECT * FROM agents
+		 WHERE host_group_id = $1 AND status IN ('online', 'idle') AND deleted_at IS NULL
+		 ORDER BY id`, hostGroupID)
+	if err != nil {
+		return nil, fmt.Errorf("list online agents by host_group: %w", err)
+	}
+	return agents, nil
+}
+
+// ListOnlineAgents returns all agents that are online/idle.
+func (s *AgentStore) ListOnlineAgents(ctx context.Context) ([]Agent, error) {
+	var agents []Agent
+	err := s.db.SelectContext(ctx, &agents,
+		`SELECT * FROM agents
+		 WHERE status IN ('online', 'idle') AND deleted_at IS NULL
+		 ORDER BY id`)
+	if err != nil {
+		return nil, fmt.Errorf("list online agents: %w", err)
+	}
+	return agents, nil
+}
+
 // ── Offline detection ───────────────────────────────────────────────────
 
 // ListStaleOnlineAgents returns agents that are in online/busy/idle status

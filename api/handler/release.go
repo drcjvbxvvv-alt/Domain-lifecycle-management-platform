@@ -31,6 +31,7 @@ type CreateReleaseRequest struct {
 	TemplateVersionID int64   `json:"template_version_id" binding:"required"`
 	ReleaseType       string  `json:"release_type"`    // "html" | "nginx" | "full"; defaults to "html"
 	TriggerSource     string  `json:"trigger_source"`  // "ui" | "api" | "ci"; defaults to "ui"
+	ShardStrategy     string  `json:"shard_strategy"`  // "by_host_group" (default) | "by_region"
 	Description       *string `json:"description"`
 	DomainIDs         []int64 `json:"domain_ids"`      // explicit scope; empty = all active
 }
@@ -52,6 +53,7 @@ func (h *ReleaseHandler) Create(c *gin.Context) {
 		TemplateVersionID: req.TemplateVersionID,
 		ReleaseType:       req.ReleaseType,
 		TriggerSource:     req.TriggerSource,
+		ShardStrategy:     release.ShardStrategy(req.ShardStrategy),
 		Description:       req.Description,
 		DomainIDs:         req.DomainIDs,
 		CreatedBy:         &userID,
@@ -244,6 +246,70 @@ func (h *ReleaseHandler) Cancel(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"code": 0, "message": "ok", "data": nil})
+}
+
+// Rollback handles POST /api/v1/releases/:id/rollback
+func (h *ReleaseHandler) Rollback(c *gin.Context) {
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"code": 40000, "data": nil, "message": "invalid release id"})
+		return
+	}
+
+	var req struct {
+		Reason string `json:"reason"`
+	}
+	_ = c.ShouldBindJSON(&req)
+	if req.Reason == "" {
+		req.Reason = "operator rollback"
+	}
+
+	userID := middleware.GetUserID(c)
+	triggeredBy := triggeredByStr(userID)
+
+	if err := h.svc.Rollback(c.Request.Context(), release.RollbackInput{
+		ReleaseDBID: id,
+		Reason:      req.Reason,
+		TriggeredBy: triggeredBy,
+	}); err != nil {
+		switch {
+		case errors.Is(err, release.ErrRollbackNotAllowed):
+			c.JSON(http.StatusConflict, gin.H{"code": 40900, "data": nil, "message": err.Error()})
+		case errors.Is(err, release.ErrNoPreviousRelease):
+			c.JSON(http.StatusBadRequest, gin.H{"code": 40004, "data": nil, "message": err.Error()})
+		case errors.Is(err, release.ErrReleaseNotFound):
+			c.JSON(http.StatusNotFound, gin.H{"code": 40400, "data": nil, "message": "release not found"})
+		default:
+			h.logger.Error("rollback release", zap.Error(err))
+			c.JSON(http.StatusInternalServerError, gin.H{"code": 50000, "data": nil, "message": "internal error"})
+		}
+		return
+	}
+
+	c.JSON(http.StatusAccepted, gin.H{"code": 0, "message": "rollback initiated", "data": nil})
+}
+
+// DryRun handles GET /api/v1/releases/:id/dry-run
+func (h *ReleaseHandler) DryRun(c *gin.Context) {
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"code": 40000, "data": nil, "message": "invalid release id"})
+		return
+	}
+
+	result, err := h.svc.DryRun(c.Request.Context(), id)
+	if err != nil {
+		switch {
+		case errors.Is(err, release.ErrReleaseNotFound):
+			c.JSON(http.StatusNotFound, gin.H{"code": 40400, "data": nil, "message": "release not found"})
+		default:
+			h.logger.Error("dry run", zap.Error(err))
+			c.JSON(http.StatusInternalServerError, gin.H{"code": 50000, "data": nil, "message": err.Error()})
+		}
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"code": 0, "message": "ok", "data": result})
 }
 
 // History handles GET /api/v1/releases/:id/history

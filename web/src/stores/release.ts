@@ -1,7 +1,7 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
 import { releaseApi } from '@/api/release'
-import type { ReleaseResponse, ReleaseShardResponse, ReleaseStateHistoryEntry } from '@/types/release'
+import type { ReleaseResponse, ReleaseShardResponse, ReleaseStateHistoryEntry, DryRunResult } from '@/types/release'
 import type { ApiResponse, PaginatedData } from '@/types/common'
 
 export const useReleaseStore = defineStore('release', () => {
@@ -43,5 +43,35 @@ export const useReleaseStore = defineStore('release', () => {
     history.value = res.data?.items ?? []
   }
 
-  return { releases, total, loading, current, shards, history, fetchByProject, fetchOne, fetchShards, fetchHistory }
+  async function create(data: { project_id: number; project_slug: string; template_version_id: number; release_type?: string; description?: string; domain_ids?: number[] }) {
+    const res = await releaseApi.create(data) as unknown as ApiResponse<ReleaseResponse>
+    return res.data
+  }
+
+  async function pause(id: string, reason?: string) {
+    await releaseApi.pause(id, reason)
+    await fetchOne(id)
+  }
+
+  async function resume(id: string) {
+    await releaseApi.resume(id)
+    await fetchOne(id)
+  }
+
+  async function cancel(id: string, reason?: string) {
+    await releaseApi.cancel(id, reason)
+    await fetchOne(id)
+  }
+
+  async function rollback(id: string, reason?: string) {
+    await releaseApi.rollback(id, reason)
+    await fetchOne(id)
+  }
+
+  async function dryRun(id: string): Promise<DryRunResult | null> {
+    const res = await releaseApi.dryRun(id) as unknown as ApiResponse<DryRunResult>
+    return res.data ?? null
+  }
+
+  return { releases, total, loading, current, shards, history, fetchByProject, fetchOne, fetchShards, fetchHistory, create, pause, resume, cancel, rollback, dryRun }
 })

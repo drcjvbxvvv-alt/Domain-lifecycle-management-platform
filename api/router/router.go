@@ -93,7 +93,9 @@ func RegisterV1(r *gin.Engine, deps Deps) {
 			releases.POST("/:id/pause", middleware.RequireAnyRole("operator", "release_manager", "admin"), deps.ReleaseHandler.Pause)
 			releases.POST("/:id/resume", middleware.RequireAnyRole("operator", "release_manager", "admin"), deps.ReleaseHandler.Resume)
 			releases.POST("/:id/cancel", middleware.RequireAnyRole("operator", "release_manager", "admin"), deps.ReleaseHandler.Cancel)
+			releases.POST("/:id/rollback", middleware.RequireAnyRole("release_manager", "admin"), deps.ReleaseHandler.Rollback)
 			releases.GET("/:id/history", middleware.RequireAnyRole("viewer", "operator", "release_manager", "admin", "auditor"), deps.ReleaseHandler.History)
+			releases.GET("/:id/dry-run", middleware.RequireAnyRole("viewer", "operator", "release_manager", "admin", "auditor"), deps.ReleaseHandler.DryRun)
 		}
 
 		// ── Agents (management console, read + transition) ────────────

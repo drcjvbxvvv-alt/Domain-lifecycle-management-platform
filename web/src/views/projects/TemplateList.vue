@@ -3,7 +3,7 @@ import { onMounted, h } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import type { DataTableColumns } from 'naive-ui'
 import { NButton } from 'naive-ui'
-import { AppTable, PageHeader } from '@/components'
+import { AppTable, PageHeader, PageHint } from '@/components'
 import { useTemplateStore } from '@/stores/template'
 import type { TemplateResponse } from '@/types/template'
 
@@ -29,7 +29,15 @@ onMounted(() => store.fetchByProject(pid))
 
 <template>
   <div class="list-page">
-    <PageHeader title="範本管理" />
+    <PageHeader title="範本管理">
+      <template #hint>
+        <PageHint storage-key="template-list" title="範本管理說明">
+          範本支援 <strong>HTML 頁面</strong>與 <strong>Nginx conf</strong> 兩種類型。<br>
+          點擊範本「查看」可查看所有版本及其 Version ID；建立發布時需填入具體的 Version ID（數字）。<br>
+          版本一旦發布即不可修改，需異動內容時請建立新版本。
+        </PageHint>
+      </template>
+    </PageHeader>
     <AppTable
       :columns="columns"
       :data="store.templates"

@@ -57,3 +57,25 @@ export interface ReleaseStateHistoryEntry {
   triggered_by: string
   created_at:   string
 }
+
+// P2.4 — Dry-run diff preview types
+export interface DryRunResult {
+  release_id:      string
+  new_artifact_id: string
+  old_artifact_id: string | null
+  summary:         DiffSummary
+  files:           FileDiff[]
+}
+
+export interface DiffSummary {
+  added:     number
+  removed:   number
+  modified:  number
+  unchanged: number
+}
+
+export interface FileDiff {
+  path:   string
+  change: 'added' | 'removed' | 'modified' | 'unchanged'
+  diff?:  string
+}

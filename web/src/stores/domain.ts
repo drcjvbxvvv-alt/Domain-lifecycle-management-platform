@@ -1,7 +1,7 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
 import { domainApi } from '@/api/domain'
-import type { DomainResponse } from '@/types/domain'
+import type { DomainResponse, RegisterDomainRequest, DomainTransitionRequest } from '@/types/domain'
 import type { ApiResponse, PaginatedData } from '@/types/common'
 
 export const useDomainStore = defineStore('domain', () => {
@@ -31,5 +31,17 @@ export const useDomainStore = defineStore('domain', () => {
     }
   }
 
-  return { domains, total, loading, current, fetchList, fetchOne }
+  async function register(data: RegisterDomainRequest) {
+    const res = await domainApi.register(data) as unknown as ApiResponse<DomainResponse>
+    await fetchList()
+    return res.data
+  }
+
+  async function transition(id: string, data: DomainTransitionRequest) {
+    const res = await domainApi.transition(id, data) as unknown as ApiResponse<DomainResponse>
+    current.value = res.data
+    return res.data
+  }
+
+  return { domains, total, loading, current, fetchList, fetchOne, register, transition }
 })

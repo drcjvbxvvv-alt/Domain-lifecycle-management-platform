@@ -1,4 +1,5 @@
 export interface ProjectResponse {
+  id:          number
   uuid:        string
   name:        string
   slug:        string

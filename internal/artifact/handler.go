@@ -12,27 +12,36 @@ import (
 	"domain-platform/store/postgres"
 )
 
+// ReleaseReadyCallback is called after a successful artifact build that is
+// linked to a release. It transitions the release from planning → ready.
+type ReleaseReadyCallback func(ctx context.Context, releaseDBID int64, artifactDBID int64) error
+
 // HandleBuild is the asynq task handler for TypeArtifactBuild.
 // It fetches domains, merges variables, and delegates to Builder.Build.
+// If the build is linked to a release, it calls the releaseReady callback.
 type HandleBuild struct {
-	builder     *Builder
-	domainStore *postgres.DomainStore
-	tmplStore   *postgres.TemplateStore
-	logger      *zap.Logger
+	builder      *Builder
+	domainStore  *postgres.DomainStore
+	tmplStore    *postgres.TemplateStore
+	releaseReady ReleaseReadyCallback
+	logger       *zap.Logger
 }
 
 // NewHandleBuild creates a new artifact build task handler.
+// releaseReady may be nil if the release callback is not yet wired.
 func NewHandleBuild(
 	builder *Builder,
 	domainStore *postgres.DomainStore,
 	tmplStore *postgres.TemplateStore,
+	releaseReady ReleaseReadyCallback,
 	logger *zap.Logger,
 ) *HandleBuild {
 	return &HandleBuild{
-		builder:     builder,
-		domainStore: domainStore,
-		tmplStore:   tmplStore,
-		logger:      logger,
+		builder:      builder,
+		domainStore:  domainStore,
+		tmplStore:    tmplStore,
+		releaseReady: releaseReady,
+		logger:       logger,
 	}
 }
 
@@ -112,6 +121,19 @@ func (h *HandleBuild) ProcessTask(ctx context.Context, t *asynq.Task) error {
 		zap.String("artifact_id", result.Artifact.ArtifactID),
 		zap.String("checksum", result.Artifact.Checksum),
 	)
+
+	// If this build is linked to a release, call MarkReady to transition
+	// the release from planning → ready and enqueue dispatch.
+	if payload.ReleaseID != nil && h.releaseReady != nil {
+		if err := h.releaseReady(ctx, *payload.ReleaseID, result.Artifact.ID); err != nil {
+			return fmt.Errorf("mark release ready (release=%d, artifact=%d): %w",
+				*payload.ReleaseID, result.Artifact.ID, err)
+		}
+		h.logger.Info("release marked ready after artifact build",
+			zap.Int64("release_id", *payload.ReleaseID),
+			zap.Int64("artifact_id", result.Artifact.ID),
+		)
+	}
 
 	return nil
 }

@@ -211,18 +211,44 @@ func (s *ReleaseStore) SetEndedAt(ctx context.Context, releaseDBID int64) error 
 	return nil
 }
 
-// IncrementSuccess atomically increments success_count.
+// IncrementSuccess atomically increments success_count by 1.
 func (s *ReleaseStore) IncrementSuccess(ctx context.Context, releaseDBID int64) error {
 	_, err := s.db.ExecContext(ctx,
 		`UPDATE releases SET success_count = success_count + 1 WHERE id = $1`, releaseDBID)
 	return err
 }
 
-// IncrementFailure atomically increments failure_count.
+// IncrementFailure atomically increments failure_count by 1.
 func (s *ReleaseStore) IncrementFailure(ctx context.Context, releaseDBID int64) error {
 	_, err := s.db.ExecContext(ctx,
 		`UPDATE releases SET failure_count = failure_count + 1 WHERE id = $1`, releaseDBID)
 	return err
+}
+
+// IncrementSuccessBy atomically increments success_count by n.
+func (s *ReleaseStore) IncrementSuccessBy(ctx context.Context, releaseDBID int64, n int) error {
+	if n == 0 {
+		return nil
+	}
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE releases SET success_count = success_count + $1 WHERE id = $2`, n, releaseDBID)
+	if err != nil {
+		return fmt.Errorf("increment success by %d on release %d: %w", n, releaseDBID, err)
+	}
+	return nil
+}
+
+// IncrementFailureBy atomically increments failure_count by n.
+func (s *ReleaseStore) IncrementFailureBy(ctx context.Context, releaseDBID int64, n int) error {
+	if n == 0 {
+		return nil
+	}
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE releases SET failure_count = failure_count + $1 WHERE id = $2`, n, releaseDBID)
+	if err != nil {
+		return fmt.Errorf("increment failure by %d on release %d: %w", n, releaseDBID, err)
+	}
+	return nil
 }
 
 // ── Transition (single write path) ──────────────────────────────────────────
@@ -309,6 +335,24 @@ func (s *ReleaseStore) GetHistory(ctx context.Context, releaseDBID int64, limit 
 	return rows, nil
 }
 
+// GetLastSucceeded returns the most recent succeeded release for a project
+// with an ID strictly less than beforeID (used to find the rollback target).
+func (s *ReleaseStore) GetLastSucceeded(ctx context.Context, projectID int64, beforeID int64) (*Release, error) {
+	var r Release
+	err := s.db.GetContext(ctx, &r,
+		`SELECT `+releaseColumns+` FROM releases
+		 WHERE project_id = $1 AND status = 'succeeded' AND artifact_id IS NOT NULL AND id < $2
+		 ORDER BY id DESC LIMIT 1`,
+		projectID, beforeID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrReleaseNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get last succeeded release: %w", err)
+	}
+	return &r, nil
+}
+
 // BeginTx starts a new transaction.
 func (s *ReleaseStore) BeginTx(ctx context.Context) (*sqlx.Tx, error) {
 	return s.db.BeginTxx(ctx, nil)
@@ -369,4 +413,64 @@ func (s *ReleaseStore) ListShards(ctx context.Context, releaseDBID int64) ([]Rel
 		return nil, fmt.Errorf("list release shards: %w", err)
 	}
 	return items, nil
+}
+
+// GetShardByID returns a shard by its DB ID.
+func (s *ReleaseStore) GetShardByID(ctx context.Context, shardID int64) (*ReleaseShard, error) {
+	var shard ReleaseShard
+	err := s.db.GetContext(ctx, &shard,
+		`SELECT id, release_id, shard_index, is_canary, domain_count, status,
+		        started_at, ended_at, success_count, failure_count, pause_reason
+		 FROM release_shards WHERE id = $1`, shardID)
+	if err != nil {
+		return nil, fmt.Errorf("get shard %d: %w", shardID, err)
+	}
+	return &shard, nil
+}
+
+// UpdateShardStatus updates a shard's status and optionally sets started_at or ended_at.
+func (s *ReleaseStore) UpdateShardStatus(ctx context.Context, shardID int64, status string) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE release_shards SET status = $1,
+		 started_at = CASE WHEN $1 IN ('dispatching', 'running') AND started_at IS NULL THEN NOW() ELSE started_at END,
+		 ended_at = CASE WHEN $1 IN ('succeeded', 'failed', 'cancelled') THEN NOW() ELSE ended_at END
+		 WHERE id = $2`,
+		status, shardID)
+	if err != nil {
+		return fmt.Errorf("update shard %d status: %w", shardID, err)
+	}
+	return nil
+}
+
+// UpdateShardCounts updates a shard's success and failure counts.
+func (s *ReleaseStore) UpdateShardCounts(ctx context.Context, shardID int64, successCount, failureCount int) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE release_shards SET success_count = $1, failure_count = $2 WHERE id = $3`,
+		successCount, failureCount, shardID)
+	if err != nil {
+		return fmt.Errorf("update shard %d counts: %w", shardID, err)
+	}
+	return nil
+}
+
+// GetNextPendingShard returns the next shard with shard_index > afterIndex
+// that is still in "pending" status, ordered by shard_index ascending.
+// Returns nil (with no error) if no such shard exists (all shards done).
+func (s *ReleaseStore) GetNextPendingShard(ctx context.Context, releaseID int64, afterIndex int) (*ReleaseShard, error) {
+	var shard ReleaseShard
+	err := s.db.GetContext(ctx, &shard,
+		`SELECT id, release_id, shard_index, is_canary, domain_count, status,
+		        started_at, ended_at, success_count, failure_count, pause_reason
+		 FROM release_shards
+		 WHERE release_id = $1 AND shard_index > $2 AND status = 'pending'
+		 ORDER BY shard_index
+		 LIMIT 1`,
+		releaseID, afterIndex)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get next pending shard for release %d after index %d: %w", releaseID, afterIndex, err)
+	}
+	return &shard, nil
 }

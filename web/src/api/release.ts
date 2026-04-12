@@ -1,5 +1,5 @@
 import { http } from '@/utils/http'
-import type { ReleaseResponse, ReleaseShardResponse, ReleaseStateHistoryEntry } from '@/types/release'
+import type { ReleaseResponse, ReleaseShardResponse, ReleaseStateHistoryEntry, DryRunResult } from '@/types/release'
 import type { PaginatedData } from '@/types/common'
 
 export const releaseApi = {
@@ -9,20 +9,30 @@ export const releaseApi = {
   get: (id: string) =>
     http.get<ReleaseResponse>(`/releases/${id}`),
 
-  create: (data: { project_id: number; title?: string; shard_size?: number }) =>
+  create: (data: {
+    project_id: number
+    project_slug: string
+    template_version_id: number
+    release_type?: string
+    description?: string
+    domain_ids?: number[]
+  }) =>
     http.post<ReleaseResponse>('/releases', data),
 
   start: (id: string) =>
     http.post(`/releases/${id}/start`),
 
-  pause: (id: string) =>
-    http.post(`/releases/${id}/pause`),
+  pause: (id: string, reason?: string) =>
+    http.post(`/releases/${id}/pause`, { reason }),
 
   resume: (id: string) =>
     http.post(`/releases/${id}/resume`),
 
-  rollback: (id: string) =>
-    http.post(`/releases/${id}/rollback`),
+  rollback: (id: string, reason?: string) =>
+    http.post(`/releases/${id}/rollback`, { reason }),
+
+  dryRun: (id: string) =>
+    http.get<DryRunResult>(`/releases/${id}/dry-run`),
 
   shards: (id: string) =>
     http.get<ReleaseShardResponse[]>(`/releases/${id}/shards`),
@@ -30,6 +40,6 @@ export const releaseApi = {
   history: (id: string) =>
     http.get<{ items: ReleaseStateHistoryEntry[] }>(`/releases/${id}/history`),
 
-  cancel: (id: string) =>
-    http.post(`/releases/${id}/cancel`),
+  cancel: (id: string, reason?: string) =>
+    http.post(`/releases/${id}/cancel`, { reason }),
 }

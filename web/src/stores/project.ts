@@ -1,7 +1,7 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
 import { projectApi } from '@/api/project'
-import type { ProjectResponse } from '@/types/project'
+import type { ProjectResponse, CreateProjectRequest } from '@/types/project'
 import type { ApiResponse, PaginatedData } from '@/types/common'
 
 export const useProjectStore = defineStore('project', () => {
@@ -31,5 +31,11 @@ export const useProjectStore = defineStore('project', () => {
     }
   }
 
-  return { projects, total, loading, current, fetchList, fetchOne }
+  async function create(data: CreateProjectRequest) {
+    const res = await projectApi.create(data) as unknown as ApiResponse<ProjectResponse>
+    await fetchList()
+    return res.data
+  }
+
+  return { projects, total, loading, current, fetchList, fetchOne, create }
 })

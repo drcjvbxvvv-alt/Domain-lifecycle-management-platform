@@ -78,8 +78,12 @@ type TaskEnvelope struct {
 	Domains     []string     `json:"domains"`
 	DeployPath  string       `json:"deploy_path"`  // e.g., /var/www
 	NginxPath   string       `json:"nginx_path"`    // e.g., /etc/nginx/conf.d
-	AllowReload bool         `json:"allow_reload"`  // whether nginx reload is permitted
-	Verify      VerifyConfig `json:"verify"`
+	AllowReload      bool         `json:"allow_reload"`       // whether nginx reload is permitted
+	Verify           VerifyConfig `json:"verify"`
+	// TargetReleaseID is only used for TaskTypeRollback.
+	// It identifies which release's local snapshot to restore from.
+	// The snapshot lives at {DeployPath}/.previous/{TargetReleaseID}/.
+	TargetReleaseID  string       `json:"target_release_id,omitempty"`
 }
 
 // VerifyConfig describes local verification after deployment.

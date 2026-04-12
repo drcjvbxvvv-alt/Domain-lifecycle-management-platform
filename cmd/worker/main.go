@@ -13,6 +13,7 @@ import (
 
 	"domain-platform/internal/artifact"
 	"domain-platform/internal/bootstrap"
+	"domain-platform/internal/release"
 	"domain-platform/internal/tasks"
 	pkgstorage "domain-platform/pkg/storage"
 	"domain-platform/store/postgres"
@@ -53,6 +54,10 @@ func main() {
 	artifactStore := postgres.NewArtifactStore(db)
 	domainStore := postgres.NewDomainStore(db)
 	templateStore := postgres.NewTemplateStore(db)
+	agentStore := postgres.NewAgentStore(db)
+	releaseStore := postgres.NewReleaseStore(db)
+	domainTaskStore := postgres.NewDomainTaskStore(db)
+	rollbackStore := postgres.NewRollbackStore(db)
 	jwtCfg := cfg.JWT
 
 	signingKey := jwtCfg.Secret // reuse JWT secret as HMAC signing key for P1
@@ -60,8 +65,23 @@ func main() {
 
 	minioStorage := pkgstorage.NewMinIOStorage(storageClient, cfg.Storage.ArtifactsBucket)
 
+	asynqClient := bootstrap.NewAsynqClient(cfg.Redis)
+	defer asynqClient.Close()
+
+	// Release service (needed by release handlers + artifact build callback)
+	releaseSvc := release.NewService(
+		releaseStore, domainStore, templateStore, agentStore, artifactStore,
+		domainTaskStore, rollbackStore, minioStorage, asynqClient, logger,
+	)
+
 	builder := artifact.NewBuilder(artifactStore, templateStore, minioStorage, signer, logger)
-	artifactBuildHandler := artifact.NewHandleBuild(builder, domainStore, templateStore, logger)
+	artifactBuildHandler := artifact.NewHandleBuild(builder, domainStore, templateStore, releaseSvc.MarkReady, logger)
+
+	// Release asynq handlers
+	releasePlanHandler := release.NewHandlePlan(releaseSvc, logger)
+	releaseDispatchHandler := release.NewHandleDispatchShard(releaseSvc, logger)
+	releaseFinalizeHandler := release.NewHandleFinalize(releaseSvc, logger)
+	releaseRollbackHandler := release.NewHandleRollback(releaseSvc, logger)
 
 	// ── asynq server with canonical queue layout ───────────────────────────
 	// Queue priorities: critical(10) > release(6) > artifact(5) > lifecycle(4) > probe(3) > default(2)
@@ -89,11 +109,11 @@ func main() {
 	mux.HandleFunc(tasks.TypeLifecycleProvision, stubFor(tasks.TypeLifecycleProvision))
 	mux.HandleFunc(tasks.TypeLifecycleDeprovision, stubFor(tasks.TypeLifecycleDeprovision))
 	mux.HandleFunc(tasks.TypeArtifactSign, stubFor(tasks.TypeArtifactSign))
-	mux.HandleFunc(tasks.TypeReleasePlan, stubFor(tasks.TypeReleasePlan))
-	mux.HandleFunc(tasks.TypeReleaseDispatchShard, stubFor(tasks.TypeReleaseDispatchShard))
+	mux.Handle(tasks.TypeReleasePlan, releasePlanHandler)
+	mux.Handle(tasks.TypeReleaseDispatchShard, releaseDispatchHandler)
 	mux.HandleFunc(tasks.TypeReleaseProbeVerify, stubFor(tasks.TypeReleaseProbeVerify))
-	mux.HandleFunc(tasks.TypeReleaseFinalize, stubFor(tasks.TypeReleaseFinalize))
-	mux.HandleFunc(tasks.TypeReleaseRollback, stubFor(tasks.TypeReleaseRollback))
+	mux.Handle(tasks.TypeReleaseFinalize, releaseFinalizeHandler)
+	mux.Handle(tasks.TypeReleaseRollback, releaseRollbackHandler)
 	mux.HandleFunc(tasks.TypeAgentHealthCheck, stubFor(tasks.TypeAgentHealthCheck))
 	mux.HandleFunc(tasks.TypeAgentUpgradeDispatch, stubFor(tasks.TypeAgentUpgradeDispatch))
 	mux.HandleFunc(tasks.TypeProbeRunL1, stubFor(tasks.TypeProbeRunL1))

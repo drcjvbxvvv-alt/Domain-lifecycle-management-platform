@@ -3,7 +3,7 @@ import { onMounted, h } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { NTabs, NTabPane, NButton, NDescriptions, NDescriptionsItem } from 'naive-ui'
 import type { DataTableColumns } from 'naive-ui'
-import { AppTable, PageHeader, StatusTag } from '@/components'
+import { AppTable, PageHeader, StatusTag, PageHint } from '@/components'
 import { useProjectStore } from '@/stores/project'
 import { useDomainStore } from '@/stores/domain'
 import { useReleaseStore } from '@/stores/release'
@@ -22,7 +22,7 @@ const releaseStore  = useReleaseStore()
 const templateStore = useTemplateStore()
 
 const domainCols: DataTableColumns<DomainResponse> = [
-  { title: 'FQDN',  key: 'fqdn', ellipsis: { tooltip: true } },
+  { title: '域名',  key: 'fqdn', ellipsis: { tooltip: true } },
   { title: '狀態',   key: 'lifecycle_state', width: 120,
     render: (row) => h(StatusTag, { status: row.lifecycle_state }) },
   { title: '建立時間', key: 'created_at', width: 180,
@@ -76,7 +76,15 @@ onMounted(async () => {
     <PageHeader
       :title="projectStore.current?.name ?? '載入中...'"
       :subtitle="`slug: ${projectStore.current?.slug ?? ''}`"
-    />
+    >
+      <template #hint>
+        <PageHint storage-key="project-detail" title="專案詳情說明">
+          <strong>域名 tab</strong>：此專案下所有域名，點擊「查看」可進行生命週期操作。<br>
+          <strong>範本 tab</strong>：可用於發布的 HTML / Nginx conf 範本，點擊查看各版本及 Version ID。<br>
+          <strong>發布 tab</strong>：歷史發布記錄，點擊「查看」進入發布操作頁（暫停 / 回滾 / Dry Run）。
+        </PageHint>
+      </template>
+    </PageHeader>
 
     <div v-if="projectStore.current" class="detail-page__body">
       <div class="detail-page__sidebar">

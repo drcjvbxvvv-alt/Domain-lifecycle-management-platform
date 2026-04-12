@@ -5,7 +5,7 @@ import {
   NTabs, NTabPane, NDescriptions, NDescriptionsItem,
   NAlert, NTimeline, NTimelineItem,
 } from 'naive-ui'
-import { PageHeader, StatusTag } from '@/components'
+import { PageHeader, StatusTag, PageHint } from '@/components'
 import { useAgentStore } from '@/stores/agent'
 
 const route = useRoute()
@@ -23,7 +23,15 @@ onMounted(async () => {
     <PageHeader
       :title="store.current?.hostname ?? '載入中...'"
       :subtitle="store.current?.agent_id ?? 'Agent 詳情'"
-    />
+    >
+      <template #hint>
+        <PageHint storage-key="agent-detail" title="Agent 詳情說明">
+          最後心跳時間超過 30 秒表示連線可能異常；頂部若有紅色提示框代表 Agent 回報了錯誤。<br>
+          <strong>error 狀態</strong>：需排查 Agent 主機問題，確認修復後由管理員手動清除狀態。<br>
+          狀態歷史記錄所有轉換及原因，可用於問題追蹤。
+        </PageHint>
+      </template>
+    </PageHeader>
 
     <div v-if="store.current" class="detail-page__body">
       <div class="detail-page__sidebar">

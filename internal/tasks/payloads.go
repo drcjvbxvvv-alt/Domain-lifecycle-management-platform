@@ -45,15 +45,14 @@ type ArtifactSignPayload struct {
 
 // ReleasePlanPayload is the payload for TypeReleasePlan.
 type ReleasePlanPayload struct {
-	ReleaseID   int64  `json:"release_id"`
-	ReleaseUUID string `json:"release_uuid"`
+	ReleaseID int64   `json:"release_id"`
+	DomainIDs []int64 `json:"domain_ids"`
 }
 
 // ReleaseDispatchShardPayload is the payload for TypeReleaseDispatchShard.
 type ReleaseDispatchShardPayload struct {
-	ReleaseID   int64   `json:"release_id"`
-	ShardID     int64   `json:"shard_id"`
-	AgentIDs    []int64 `json:"agent_ids"`
+	ReleaseID int64 `json:"release_id"`
+	ShardID   int64 `json:"shard_id"`
 }
 
 // ReleaseProbeVerifyPayload is the payload for TypeReleaseProbeVerify.
@@ -64,15 +63,16 @@ type ReleaseProbeVerifyPayload struct {
 
 // ReleaseFinalizePayload is the payload for TypeReleaseFinalize.
 type ReleaseFinalizePayload struct {
-	ReleaseID   int64  `json:"release_id"`
-	ReleaseUUID string `json:"release_uuid"`
+	ReleaseID int64 `json:"release_id"`
+	RetryNum  int   `json:"retry_num,omitempty"`
 }
 
 // ReleaseRollbackPayload is the payload for TypeReleaseRollback.
 type ReleaseRollbackPayload struct {
-	ReleaseID          int64  `json:"release_id"`
-	TargetArtifactID   int64  `json:"target_artifact_id"`
-	TriggeredBy        string `json:"triggered_by"`
+	ReleaseID        int64  `json:"release_id"`
+	TargetArtifactID int64  `json:"target_artifact_id"`
+	TriggeredBy      string `json:"triggered_by"`
+	RollbackRecordID int64  `json:"rollback_record_id,omitempty"`
 }
 
 // ── Agent ─────────────────────────────────────────────────────────────────────

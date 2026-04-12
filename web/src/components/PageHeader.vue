@@ -18,24 +18,31 @@ defineProps<{
 -->
 <template>
   <div class="page-header">
-    <div class="page-header__left">
-      <h1 class="page-header__title">{{ title }}</h1>
-      <p v-if="subtitle" class="page-header__subtitle">{{ subtitle }}</p>
+    <div class="page-header__row">
+      <div class="page-header__left">
+        <h1 class="page-header__title">{{ title }}</h1>
+        <p v-if="subtitle" class="page-header__subtitle">{{ subtitle }}</p>
+      </div>
+      <div class="page-header__actions">
+        <slot name="actions" />
+      </div>
     </div>
-    <div class="page-header__actions">
-      <slot name="actions" />
-    </div>
+    <slot name="hint" />
   </div>
 </template>
 
 <style scoped>
 .page-header {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
+  flex-direction: column;
   padding-bottom: 16px;
   border-bottom: 1px solid var(--border);
   flex-shrink: 0;
+}
+.page-header__row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
 }
 
 .page-header__left {

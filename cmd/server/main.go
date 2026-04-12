@@ -24,6 +24,7 @@ import (
 	"domain-platform/internal/project"
 	"domain-platform/internal/release"
 	tmplsvc "domain-platform/internal/template"
+	pkgstorage "domain-platform/pkg/storage"
 	"domain-platform/store/postgres"
 )
 
@@ -60,9 +61,7 @@ func main() {
 	if err != nil {
 		logger.Fatal("connect storage", zap.Error(err))
 	}
-	_ = storageClient // used by handlers in P1.7+
-
-	// ── Auth + stores ─────────────���─────────────────────────────────────���─
+	// ── Auth + stores ─────────────────────────────────────────────────────
 	userStore := postgres.NewUserStore(db)
 	roleStore := postgres.NewRoleStore(db)
 	jwtMgr := auth.NewJWTManager(cfg.JWT.Secret, cfg.JWT.Expiry)
@@ -86,10 +85,13 @@ func main() {
 	artifactHandler := handler.NewArtifactHandler(artifactStore, logger)
 
 	releaseStore := postgres.NewReleaseStore(db)
-	releaseSvc := release.NewService(releaseStore, domainStore, templateStore, asynqClient, logger)
+	domainTaskStore := postgres.NewDomainTaskStore(db)
+	agentStore := postgres.NewAgentStore(db)
+	rollbackStore := postgres.NewRollbackStore(db)
+	pkgStorage := pkgstorage.NewMinIOStorage(storageClient, cfg.Storage.ArtifactsBucket)
+	releaseSvc := release.NewService(releaseStore, domainStore, templateStore, agentStore, artifactStore, domainTaskStore, rollbackStore, pkgStorage, asynqClient, logger)
 	releaseHandler := handler.NewReleaseHandler(releaseSvc, logger)
 
-	agentStore := postgres.NewAgentStore(db)
 	agentSvc := agentsvc.NewService(agentStore, logger)
 	agentProtocolHandler := handler.NewAgentProtocolHandler(agentSvc, logger)
 	agentHandler := handler.NewAgentHandler(agentSvc, logger)
