@@ -133,25 +133,6 @@ function getIconSvg(name: string): string {
         </div>
       </nav>
 
-      <!-- Bottom: user info -->
-      <div class="sidebar-user" :class="{ 'sidebar-user--collapsed': collapsed }">
-        <div class="sidebar-user__divider" />
-        <NDropdown :options="userDropdownOptions" @select="onUserAction" placement="top-start">
-          <div class="sidebar-user__inner">
-            <NAvatar round size="small" style="background: #1e40af; color: #fff; font-size: 11px; flex-shrink: 0;">
-              {{ auth.user?.username?.[0]?.toUpperCase() ?? 'U' }}
-            </NAvatar>
-            <span v-if="!collapsed" class="sidebar-user__name">{{ auth.user?.username ?? '使用者' }}</span>
-            <span v-if="!collapsed" class="sidebar-user__logout-icon">
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/>
-                <polyline points="16 17 21 12 16 7"/>
-                <line x1="21" y1="12" x2="9" y2="12"/>
-              </svg>
-            </span>
-          </div>
-        </NDropdown>
-      </div>
     </NLayoutSider>
 
     <!-- ─── Main content area ───────────────────────────────────────────── -->
@@ -294,46 +275,6 @@ function getIconSvg(name: string): string {
   text-overflow: ellipsis;
 }
 
-/* ── Sidebar User ─────────────────────────────────────────────────────── */
-.sidebar-user {
-  padding: 8px;
-}
-.sidebar-user--collapsed {
-  display: flex;
-  justify-content: center;
-}
-.sidebar-user__divider {
-  height: 1px;
-  background: var(--sidebar-border);
-  margin-bottom: 8px;
-}
-.sidebar-user__inner {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 6px 8px;
-  border-radius: 8px;
-  cursor: pointer;
-  transition: background 0.12s;
-  overflow: hidden;
-}
-.sidebar-user__inner:hover {
-  background: var(--bg-sidebar-hover);
-}
-.sidebar-user__name {
-  flex: 1;
-  font-size: 13px;
-  color: var(--sidebar-text);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.sidebar-user__logout-icon {
-  color: var(--sidebar-text);
-  opacity: 0.5;
-  display: flex;
-  align-items: center;
-}
 
 /* ── Main Header ──────────────────────────────────────────────────────── */
 .main-header {
