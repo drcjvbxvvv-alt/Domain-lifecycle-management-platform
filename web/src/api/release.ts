@@ -1,5 +1,5 @@
 import { http } from '@/utils/http'
-import type { ReleaseResponse, ShardResponse } from '@/types/release'
+import type { ReleaseResponse, ReleaseShardResponse, ReleaseStateHistoryEntry } from '@/types/release'
 import type { PaginatedData } from '@/types/common'
 
 export const releaseApi = {
@@ -25,5 +25,11 @@ export const releaseApi = {
     http.post(`/releases/${id}/rollback`),
 
   shards: (id: string) =>
-    http.get<ShardResponse[]>(`/releases/${id}/shards`),
+    http.get<ReleaseShardResponse[]>(`/releases/${id}/shards`),
+
+  history: (id: string) =>
+    http.get<{ items: ReleaseStateHistoryEntry[] }>(`/releases/${id}/history`),
+
+  cancel: (id: string) =>
+    http.post(`/releases/${id}/cancel`),
 }

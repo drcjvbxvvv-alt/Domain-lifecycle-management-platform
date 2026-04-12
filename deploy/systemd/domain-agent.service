@@ -1,0 +1,41 @@
+[Unit]
+Description=Domain Platform Pull Agent
+Documentation=https://github.com/example/domain-platform
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=www-data
+Group=www-data
+ExecStart=/usr/local/bin/domain-agent
+WorkingDirectory=/etc/domain-platform
+Restart=always
+RestartSec=5
+
+# Environment / config
+Environment=AGENT_CONTROL_PLANE_URL=https://control-plane.example.com:8443
+Environment=AGENT_DEPLOY_PATH=/var/www
+Environment=AGENT_NGINX_PATH=/etc/nginx/conf.d
+Environment=AGENT_STAGING_PATH=/tmp/agent-staging
+Environment=AGENT_ALLOW_RELOAD=true
+
+# mTLS certs (uncomment and set paths)
+# Environment=AGENT_CERT_FILE=/etc/domain-platform/agent.crt
+# Environment=AGENT_KEY_FILE=/etc/domain-platform/agent.key
+# Environment=AGENT_CA_CERT_FILE=/etc/domain-platform/ca.crt
+
+# Security hardening
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/var/www /tmp/agent-staging /etc/nginx/conf.d
+ProtectHome=yes
+PrivateTmp=no
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=domain-agent
+
+[Install]
+WantedBy=multi-user.target

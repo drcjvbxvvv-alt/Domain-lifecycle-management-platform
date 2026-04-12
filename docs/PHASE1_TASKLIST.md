@@ -133,9 +133,10 @@ to read first**.
 
 ---
 
-### P1.1 — Scaffold Go repo + tooling + bootstrap
+### P1.1 — Scaffold Go repo + tooling + bootstrap ✅ DONE
 
 **Owner**: Sonnet
+**Completed**: 2026-04-12
 **Depends on**: nothing — first task
 **Reads first**: CLAUDE.md §"Project Structure", §"Go Coding Standards"
 
@@ -204,9 +205,10 @@ to read first**.
 
 ---
 
-### P1.2 — Phase 1 DB migrations
+### P1.2 — Phase 1 DB migrations ✅ DONE
 
 **Owner**: Sonnet
+**Completed**: 2026-04-12
 **Depends on**: P1.1
 **Reads first**: DATABASE_SCHEMA.md (entire file), CLAUDE.md §"Database Migrations"
 
@@ -258,9 +260,10 @@ to read first**.
 
 ---
 
-### P1.3 — Auth: login, JWT, RBAC with 5 roles
+### P1.3 — Auth: login, JWT, RBAC with 5 roles ✅ DONE
 
 **Owner**: Sonnet
+**Completed**: 2026-04-12
 **Depends on**: P1.2 (users, roles, user_roles tables)
 **Reads first**: CLAUDE.md §"API Conventions", DEVELOPMENT_PLAYBOOK.md §"Login identifier"
 
@@ -309,9 +312,10 @@ to read first**.
 
 ---
 
-### P1.4 — Project CRUD
+### P1.4 — Project CRUD ✅ DONE
 
 **Owner**: Sonnet
+**Completed**: 2026-04-12
 **Depends on**: P1.2, P1.3 (user roles for ownership)
 **Reads first**: DEVELOPMENT_PLAYBOOK.md §1 "How to add a new API endpoint"
 
@@ -348,9 +352,10 @@ to read first**.
 
 ---
 
-### P1.5 — Domain Lifecycle state machine + Transition() **(Opus)**
+### P1.5 — Domain Lifecycle state machine + Transition() **(Opus)** ✅ DONE
 
 **Owner**: **Opus** — bottleneck task
+**Completed**: 2026-04-12
 **Depends on**: P1.2 (domains, domain_lifecycle_history tables)
 **Runs in parallel with**: P1.3, P1.4, P1.6, P1.7, P1.10, P1.11
 **Reads first**: CLAUDE.md §"Domain Lifecycle State Machine", Critical Rule #1; ADR-0003 D9; DEVELOPMENT_PLAYBOOK.md §2
@@ -419,9 +424,10 @@ required for the previous design is mandatory here.
 
 ---
 
-### P1.6 — Template + TemplateVersion CRUD
+### P1.6 — Template + TemplateVersion CRUD ✅ DONE
 
 **Owner**: Sonnet
+**Completed**: 2026-04-12
 **Depends on**: P1.2 (templates, template_versions tables), P1.4 (project FK)
 **Reads first**: CLAUDE.md §"Domain Object Model", Critical Rule #9
 
@@ -466,11 +472,16 @@ required for the previous design is mandatory here.
 
 ---
 
-### P1.7 — Artifact Build Pipeline **(Opus on contract; Sonnet on plumbing)**
+### P1.7 — Artifact Build Pipeline **(Opus on contract; Sonnet on plumbing)** ✅ DONE (2026-04-12)
 
 **Owner**: **Opus** for the manifest format + signature scheme + immutability contract; **Sonnet** for the rendering loop and storage upload
 **Depends on**: P1.6 (template_versions to render), P1.5 (domains to render against)
 **Reads first**: ARCHITECTURE.md §2.4, CLAUDE.md Critical Rule #2, DEVELOPMENT_PLAYBOOK.md §5
+
+**Completion notes (2026-04-12)**:
+- All deliverables landed. 9 unit tests pass including reproducibility test (`-race -count=5` clean).
+- Extra deliverables beyond spec: `internal/artifact/errors.go` (sentinel errors), `store/postgres/domain.go` gained `GetVariables()` + `ListActiveByProject()`, `GET /api/v1/projects/:projectId/artifacts` list endpoint.
+- Reproducibility risk (🔴) did NOT materialize — deterministic design from the start (sorted domains, sorted files, no timestamps in content, content-addressed artifact_id) meant first run passed.
 
 **Scope (in)**:
 
@@ -540,11 +551,18 @@ every release. Once the format ships, breaking it is expensive.
 
 ---
 
-### P1.8 — Release model + state machine **(Opus on state machine)**
+### P1.8 — Release model + state machine **(Opus on state machine)** ✅ DONE (2026-04-12)
 
 **Owner**: **Opus** for the state machine + `TransitionRelease()`; **Sonnet** for the rest
 **Depends on**: P1.5 (domains), P1.6 (templates), P1.7 (artifacts)
 **Reads first**: CLAUDE.md §"Release State Machine", DEVELOPMENT_PLAYBOOK.md §10
+
+**Completion notes (2026-04-12)**:
+- All deliverables landed. 5 test functions (29 subtests) pass including graph completeness check. Race test (`-race -count=5`) clean.
+- `make check-release-writes` passes — exactly one hit in `store/postgres/release.go::updateReleaseStatusTx`.
+- State machine covers all 10 states and all valid/invalid edges per CLAUDE.md.
+- Service implements: Create (→ pending + enqueue Plan), Plan (pending → planning → ready + shard 0 + enqueue ArtifactBuild), Dispatch (ready → executing), Finalize (executing → succeeded), Pause/Resume/Cancel.
+- Phase 1 simplifications: single shard 0, auto-succeed in Finalize (no real agent tasks yet), planning → ready is immediate.
 
 **Scope (in)**:
 
@@ -617,7 +635,7 @@ every release. Once the format ships, breaking it is expensive.
 
 ---
 
-### P1.9 — `cmd/agent` Pull Agent binary **(Opus on safety boundary)**
+### P1.9 — `cmd/agent` Pull Agent binary **(Opus on safety boundary)** ✅ DONE (2026-04-12)
 
 **Owner**: **Opus** — the agent binary contains the most security-sensitive
 code in the platform and the whitelist must be enforced structurally
@@ -690,9 +708,25 @@ code in the platform and the whitelist must be enforced structurally
 production Nginx server. A bug here is a remote code execution waiting to
 happen. The safety boundary cannot be relaxed for convenience.
 
+**Completion notes (2026-04-12)**:
+- `pkg/agentprotocol/types.go` — wire types (RegisterRequest/Response, HeartbeatRequest/Response, TaskEnvelope, TaskReport, PhaseReport, VerifyConfig, Manifest reuse)
+- `cmd/agent/safety.go` — 4 hard-coded shell-outs (nginx -t, nginx -s reload) + HMAC verify + checksum verify + snapshotPrevious + copyFile. All os/exec uses have `// safe:` comments.
+- `cmd/agent/handler.go` — 9-phase deployment pipeline (download → verify_checksum → verify_signature → write → nginx_test → snapshot → swap → reload → local_verify) with per-phase timing
+- `cmd/agent/pull.go` — pullLoop (long-poll → claim → handle → report) + downloadArtifact + downloadFile
+- `cmd/agent/heartbeat.go` — heartbeatLoop with exponential backoff, auto-recovery
+- `cmd/agent/registration.go` — register() + getHostname()
+- `cmd/agent/main.go` — full agent lifecycle: config load → mTLS client build → register → heartbeat goroutine → pull goroutine → graceful shutdown
+- `configs/agent.example.yaml` — full config reference
+- `deploy/systemd/domain-agent.service` — systemd unit with security hardening
+- `internal/bootstrap/config.go` — extended AgentConfig with deploy_path, nginx_path, staging_path, signing_key, allow_reload, host_group, region
+- `make agent` cross-compile: OK (linux/amd64)
+- `make check-agent-safety`: OK (no violations)
+- All tests pass, all CI gates green
+- Integration test (fake control plane + fake S3) deferred to e2e integration pass
+
 ---
 
-### P1.10 — Agent Management (control-plane side)
+### P1.10 — Agent Management (control-plane side) ✅ DONE (2026-04-12)
 
 **Owner**: **Opus** for `TransitionAgent()`; **Sonnet** for the rest
 **Depends on**: P1.2 (agents tables), `pkg/agentprotocol` (defined here)
@@ -757,9 +791,25 @@ happen. The safety boundary cannot be relaxed for convenience.
   `agent_id`, then heartbeat, pull a task, and report
 - An online agent that stops heartbeating is transitioned to `offline` after 90s
 
+**Completion notes (2026-04-12)**:
+- `pkg/agentprotocol/types.go` — already completed in P1.9
+- `internal/agent/statemachine.go` — 9 states (registered, online, busy, idle, offline, draining, disabled, upgrading, error), all edges per CLAUDE.md, graph completeness verified
+- `internal/agent/errors.go` — ErrAgentNotFound, ErrInvalidAgentState, ErrAgentRaceCondition, ErrAgentOffline, ErrAgentDisabled, ErrNoTaskAvailable
+- `store/postgres/agent.go` — Agent/AgentTask/AgentHeartbeat models, Create/GetByID/GetByAgentID/ListByStatus/ListByHostGroup/ListAll, **single write path** `updateAgentStatusTx` (CI gate enforced), TransitionTx with SELECT FOR UPDATE + optimistic check, heartbeat persistence, task CRUD (NextPendingTask, ClaimTask, CompleteTask), deployment log insert, stale agent detection
+- `internal/agent/service.go` — TransitionAgent (validates edge + transactional), Register (create + auto-transition registered→online), Heartbeat (update last_seen + persist + auto-recover offline→online + check pending tasks), PullNextTask, ClaimTask, ReportTask (completes task + records phase logs)
+- `internal/agent/health.go` — HealthChecker.CheckStaleAgents scans for online/busy/idle agents with last_seen > 90s, transitions to offline
+- `api/middleware/mtls.go` — AgentMTLS (extracts cert serial + CN from TLS peer certs, dev-mode permissive fallback), RequireAgentCert (defense-in-depth)
+- `api/handler/agentprotocol.go` — AgentProtocolHandler (Register, Heartbeat, PollTasks, ClaimTask, ReportTask for /agent/v1/*) + AgentHandler (List, Get, Transition, History for /api/v1/agents/*)
+- `api/router/router.go` — added /api/v1/agents routes (List, Get, Transition, History) with RBAC
+- `cmd/server/main.go` — wired AgentStore → AgentService → AgentProtocolHandler + AgentHandler, agent router now serves all 5 protocol endpoints under /agent/v1
+- `internal/agent/statemachine_test.go` — 55 subtests: valid/invalid edges, targets, terminal check, graph completeness (keys ↔ AllAgentStates, all targets are known states)
+- `go test -race -count=5 ./internal/agent/...` passes
+- `make check-agent-writes` OK
+- All 4 CI gates green, all tests pass
+
 ---
 
-### P1.11 — asynq worker bootstrap
+### P1.11 — asynq worker bootstrap ✅ DONE (2026-04-12)
 
 **Owner**: Sonnet
 **Depends on**: P1.1 (worker skeleton)
@@ -798,9 +848,23 @@ happen. The safety boundary cannot be relaxed for convenience.
 - ARCHITECTURE.md §2.5 and `cmd/worker/main.go::asynq.Config.Queues` match
   exactly (same queue names, same priorities, same concurrency)
 
+**Completion notes (2026-04-12)**:
+- `internal/tasks/types.go` — all 15 task type constants (already existed; removed ArtifactBuildPayload moved to payloads.go)
+- `internal/tasks/payloads.go` — all payload structs: LifecycleProvision/Deprovision, ArtifactBuild/Sign, ReleasePlan/DispatchShard/ProbeVerify/Finalize/Rollback, AgentHealthCheck/UpgradeDispatch, ProbeRun (shared L1/L2/L3), NotifySend
+- `internal/bootstrap/asynq.go` — fixed queue priorities to match CLAUDE.md exactly (critical=10, release=6, artifact=5, lifecycle=4, probe=3, default=2); added QueueForTask map; DefaultWorkerConcurrency=75; updated NewAsynqServer to use DefaultWorkerConcurrency
+- `cmd/worker/main.go` — real handler: artifact:build wired via artifact.NewHandleBuild; stub handlers for all 14 other task types (log payload + nil); prints queue config + concurrency at boot; graceful shutdown via SIGINT/SIGTERM
+- `go build ./...` clean; all CI gates green; all tests pass
+
 ---
 
-### P1.12 — Frontend pages: project / domain / template / release / agent
+### P1.12 — Frontend pages: project / domain / template / release / agent ✅ DONE
+
+**Completed**: 2026-04-12
+**Actual effort**: ~0.3d (types/api/stores + 10 views + MainLayout + router)
+**Notes**: `npm run build` clean. Views implemented: Dashboard, ProjectList, ProjectDetail,
+TemplateList, TemplateDetail, DomainList, DomainDetail, ReleaseList, ReleaseDetail,
+AgentList, AgentDetail. All TypeScript types aligned to Go DTOs. Auth interceptor,
+router guards, MainLayout with collapsible sidebar all wired.
 
 **Owner**: Sonnet
 **Depends on**: P1.3 (login), P1.4 (project API), P1.5 (domain API),

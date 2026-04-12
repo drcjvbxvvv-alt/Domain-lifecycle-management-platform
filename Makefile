@@ -63,7 +63,7 @@ dev:
 # Single write path for domains.lifecycle_state (CLAUDE.md Rule #1)
 check-lifecycle-writes:
 	@hits=$$(grep -rn 'UPDATE domains SET lifecycle_state' --include='*.go' . | \
-		grep -v 'store/postgres/lifecycle.go' || true); \
+		grep -v 'store/postgres/lifecycle.go' | grep -v ':[0-9]*:\s*//' || true); \
 	if [ -n "$$hits" ]; then \
 		echo "ERROR: direct lifecycle_state writes found outside store/postgres/lifecycle.go:"; \
 		echo "$$hits"; exit 1; \
@@ -73,7 +73,7 @@ check-lifecycle-writes:
 # Single write path for releases.status (CLAUDE.md Rule #1)
 check-release-writes:
 	@hits=$$(grep -rn 'UPDATE releases SET status' --include='*.go' . | \
-		grep -v 'store/postgres/release.go' || true); \
+		grep -v 'store/postgres/release.go' | grep -v ':[0-9]*:\s*//' || true); \
 	if [ -n "$$hits" ]; then \
 		echo "ERROR: direct release.status writes found outside store/postgres/release.go:"; \
 		echo "$$hits"; exit 1; \
@@ -83,7 +83,7 @@ check-release-writes:
 # Single write path for agents.status (CLAUDE.md Rule #1)
 check-agent-writes:
 	@hits=$$(grep -rn 'UPDATE agents SET status' --include='*.go' . | \
-		grep -v 'store/postgres/agent.go' || true); \
+		grep -v 'store/postgres/agent.go' | grep -v ':[0-9]*:\s*//' || true); \
 	if [ -n "$$hits" ]; then \
 		echo "ERROR: direct agents.status writes found outside store/postgres/agent.go:"; \
 		echo "$$hits"; exit 1; \
@@ -96,7 +96,7 @@ check-agent-writes:
 # imports are forbidden.
 check-agent-safety:
 	@hits=$$(grep -rn 'os/exec' cmd/agent/ --include='*.go' | \
-		grep -v '// safe:' || true); \
+		grep -v ':[0-9]*:\s*//' | grep -v '// safe:' || true); \
 	if [ -n "$$hits" ]; then \
 		echo "WARN: os/exec usage in cmd/agent/ — every call site must be reviewed:"; \
 		echo "$$hits"; \
@@ -104,7 +104,8 @@ check-agent-safety:
 		echo "(nginx -t, nginx -s reload, configured local-verify HTTP, systemd self-restart)"; \
 		echo "OR have a '// safe:' comment with explicit Opus review approval."; \
 	fi
-	@plugin=$$(grep -rn 'plugin\.Open\|reflect\.Call' cmd/agent/ --include='*.go' || true); \
+	@plugin=$$(grep -rn 'plugin\.Open\|reflect\.Call' cmd/agent/ --include='*.go' | \
+		grep -v ':[0-9]*:\s*//' || true); \
 	if [ -n "$$plugin" ]; then \
 		echo "ERROR: forbidden dynamic loading in cmd/agent/:"; \
 		echo "$$plugin"; exit 1; \

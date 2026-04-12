@@ -15,10 +15,8 @@
     "noEmit": true,
     "jsx": "preserve",
 
-    /* Path alias */
-    "baseUrl": ".",
     "paths": {
-      "@/*": ["src/*"]
+      "@/*": ["./src/*"]
     },
 
     /* Linting */

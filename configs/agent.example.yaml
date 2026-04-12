@@ -1,0 +1,32 @@
+# Agent configuration example
+# Copy to config.yaml on the agent host, or set via environment variables.
+# Environment variable format: AGENT_CONTROL_PLANE_URL, AGENT_DEPLOY_PATH, etc.
+
+agent:
+  # Control plane URL (required)
+  control_plane_url: "https://control-plane.example.com:8443"
+
+  # mTLS certificate paths (optional — omit for dev/plaintext mode)
+  cert_file: "/etc/domain-platform/agent.crt"
+  key_file: "/etc/domain-platform/agent.key"
+  ca_cert_file: "/etc/domain-platform/ca.crt"
+
+  # Heartbeat interval in seconds (default: 30)
+  heartbeat_secs: 30
+
+  # Deploy target paths
+  deploy_path: "/var/www"              # HTML files destination
+  nginx_path: "/etc/nginx/conf.d"     # Nginx config destination
+  staging_path: "/tmp/agent-staging"   # Temporary staging area
+
+  # HMAC signing key for artifact signature verification
+  # Must match the control plane's signing key.
+  # Leave empty to skip signature verification (dev only).
+  signing_key: ""
+
+  # Whether to allow nginx -s reload after config deployment
+  allow_reload: true
+
+  # Agent metadata tags (used for host selection in release scoping)
+  host_group: "web"
+  region: "us-east-1"

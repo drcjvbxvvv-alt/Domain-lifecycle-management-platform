@@ -19,12 +19,62 @@ const router = createRouter({
       children: [
         {
           path: '',
+          redirect: '/projects',
+        },
+
+        // Dashboard
+        {
+          path: 'dashboard',
           name: 'Dashboard',
           component: () => import('@/views/DashboardView.vue'),
           meta: { title: 'Dashboard', minRole: 'viewer' },
         },
 
-        // Domains
+        // ── Projects ──────────────────────────────────────────
+        {
+          path: 'projects',
+          name: 'ProjectList',
+          component: () => import('@/views/projects/ProjectList.vue'),
+          meta: { title: '專案管理', minRole: 'viewer' },
+        },
+        {
+          path: 'projects/:id',
+          name: 'ProjectDetail',
+          component: () => import('@/views/projects/ProjectDetail.vue'),
+          meta: { title: '專案詳情', minRole: 'viewer' },
+        },
+        {
+          path: 'projects/:id/domains',
+          name: 'ProjectDomainList',
+          component: () => import('@/views/domains/DomainList.vue'),
+          meta: { title: '域名列表', minRole: 'viewer' },
+        },
+        {
+          path: 'projects/:id/templates',
+          name: 'TemplateList',
+          component: () => import('@/views/projects/TemplateList.vue'),
+          meta: { title: '範本列表', minRole: 'viewer' },
+        },
+        {
+          path: 'projects/:id/templates/:tid',
+          name: 'TemplateDetail',
+          component: () => import('@/views/projects/TemplateDetail.vue'),
+          meta: { title: '範本詳情', minRole: 'viewer' },
+        },
+        {
+          path: 'projects/:id/releases',
+          name: 'ProjectReleaseList',
+          component: () => import('@/views/releases/ReleaseList.vue'),
+          meta: { title: '發布列表', minRole: 'viewer' },
+        },
+        {
+          path: 'projects/:id/releases/:rid',
+          name: 'ReleaseDetail',
+          component: () => import('@/views/releases/ReleaseDetail.vue'),
+          meta: { title: '發布詳情', minRole: 'viewer' },
+        },
+
+        // ── Domains (global) ───────────────────────────────────
         {
           path: 'domains',
           name: 'DomainList',
@@ -38,15 +88,7 @@ const router = createRouter({
           meta: { title: '域名詳情', minRole: 'viewer' },
         },
 
-        // Projects
-        {
-          path: 'projects',
-          name: 'ProjectList',
-          component: () => import('@/views/projects/ProjectList.vue'),
-          meta: { title: '專案管理', minRole: 'viewer' },
-        },
-
-        // Releases
+        // ── Releases (global) ──────────────────────────────────
         {
           path: 'releases',
           name: 'ReleaseList',
@@ -54,7 +96,7 @@ const router = createRouter({
           meta: { title: '發布管理', minRole: 'viewer' },
         },
 
-        // Alerts
+        // ── Alerts ────────────────────────────────────────────
         {
           path: 'alerts',
           name: 'AlertList',
@@ -62,23 +104,21 @@ const router = createRouter({
           meta: { title: '告警記錄', minRole: 'viewer' },
         },
 
-        // Pool
+        // ── Agents ────────────────────────────────────────────
         {
-          path: 'pool',
-          name: 'PoolList',
-          component: () => import('@/views/pool/PoolList.vue'),
-          meta: { title: '備用域名池', minRole: 'operator' },
+          path: 'agents',
+          name: 'AgentList',
+          component: () => import('@/views/agents/AgentList.vue'),
+          meta: { title: 'Agent 管理', minRole: 'viewer' },
+        },
+        {
+          path: 'agents/:id',
+          name: 'AgentDetail',
+          component: () => import('@/views/agents/AgentDetail.vue'),
+          meta: { title: 'Agent 詳情', minRole: 'viewer' },
         },
 
-        // Servers
-        {
-          path: 'servers',
-          name: 'ServerList',
-          component: () => import('@/views/servers/ServerList.vue'),
-          meta: { title: '伺服器管理', minRole: 'admin' },
-        },
-
-        // Settings
+        // ── Settings ──────────────────────────────────────────
         {
           path: 'settings/users',
           name: 'UserList',
@@ -106,7 +146,7 @@ router.beforeEach((to) => {
   }
 
   if (to.name === 'Login' && auth.isLoggedIn) {
-    return { name: 'Dashboard' }
+    return { name: 'ProjectList' }
   }
 })
 

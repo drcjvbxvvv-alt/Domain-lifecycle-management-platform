@@ -1,18 +1,26 @@
 server:
   host: 0.0.0.0
   port: 8080
+  agent_port: 8443
 
 db:
   host: localhost
   port: 5432
   name: domain_platform
   user: postgres
-  password: ""
+  password: "postgres"
   ssl_mode: disable
 
 redis:
   addr: localhost:6379
   password: ""
+
+storage:
+  endpoint: "localhost:9000"
+  bucket: "artifacts"
+  access_key: "minioadmin"
+  secret_key: "minioadmin"
+  use_ssl: false
 
 jwt:
   secret: "change-me-in-production"

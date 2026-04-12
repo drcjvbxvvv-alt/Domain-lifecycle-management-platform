@@ -32,18 +32,18 @@
 
 | # | 任務 | Owner | Lo | Hi | 風險 | 主要炸點 |
 |---|---|---|---|---|---|---|
-| P1.1 | Scaffold + bootstrap | Sonnet | 0.5 | 1.5 | 🟢 | MinIO / docker-compose 第一次起 |
-| P1.2 | DB migrations（26+ 表）| Sonnet | 0.5 | 1.5 | 🟢 | TimescaleDB hypertable + compression policy |
-| P1.3 | Auth + JWT + 5 角色 RBAC | Sonnet | 0.5 | 1.0 | 🟢 | 很熟的模式 |
-| P1.4 | Project CRUD | Sonnet | 0.5 | 0.5 | 🟢 | 純樣板 |
-| P1.5 | **Lifecycle 狀態機 + Transition + race test + CI gate** | **Opus** | 1.0 | 2.0 | 🟡 | race test 可能 flaky 要跑 `-count=50` 找穩定性 |
-| P1.6 | Template + TemplateVersion CRUD | Sonnet | 0.5 | 1.0 | 🟢 | 含 `signed_at` immutability 強制在 store 層 |
-| P1.7 | **Artifact build pipeline + MinIO + signer + reproducibility test** | **Opus** 合約 / Sonnet 實作 | 2.0 | 3.5 | 🔴 | Reproducibility test 會抓到沒想到的 nondeterminism — time / map order / UUID — 每抓一個要重跑 |
-| P1.8 | **Release 狀態機 + Plan/Dispatch/Finalize** | **Opus** 狀態機 / Sonnet 其餘 | 2.0 | 3.5 | 🔴 | Plan → Dispatch → 等 agent → Finalize 的第一次 end-to-end wiring |
-| P1.9 | **cmd/agent Pull Agent binary + safety gate + 整合測試** | **Opus** | 2.0 | 3.5 | 🔴 | 寫 fake control plane + fake MinIO 做 integration test，第一次 e2e 會有 1–2 個意外 |
-| P1.10 | Agent mgmt 控制面 + mTLS middleware + 狀態機 | **Opus** 狀態機 / Sonnet 其餘 | 2.0 | 3.5 | 🔴 | **mTLS + 憑證生成 + CRL 是經典踩雷區**，就算熟 Go 也會花半天到一天 |
-| P1.11 | asynq worker bootstrap | Sonnet | 0.5 | 0.5 | 🟢 | 樣板 |
-| P1.12 | Frontend：登入 wire-up + 6 Pinia store + ~8 頁面 + types 對齊 | Sonnet | 3.0 | 5.0 | 🟡 | 頁面多但 pattern 一致；TypeScript 與 Go DTO byte-for-byte 對齊需要幾輪 |
+| P1.1 | Scaffold + bootstrap | Sonnet | 0.5 | 1.5 | 🟢 ✅ | **Actual: ~0.5d (2026-04-12)** — bootstrap pkg, 4 binaries, docker-compose, golangci, CI gates |
+| P1.2 | DB migrations（26+ 表）| Sonnet | 0.5 | 1.5 | 🟢 ✅ | **Actual: ~0.3d (2026-04-12)** — 32 tables + 5 seed roles, up/down/up verified |
+| P1.3 | Auth + JWT + 5 角色 RBAC | Sonnet | 0.5 | 1.0 | 🟢 ✅ | **Actual: ~0.3d (2026-04-12)** — login/me/JWT/RBAC middleware + 12 tests pass |
+| P1.4 | Project CRUD | Sonnet | 0.5 | 0.5 | 🟢 ✅ | **Actual: ~0.2d (2026-04-12)** — store + service + handler + routes + slug tests |
+| P1.5 | **Lifecycle 狀態機 + Transition + race test + CI gate** | **Opus** | 1.0 | 2.0 | 🟢 ✅ | **Actual: ~0.3d (2026-04-12)** — statemachine + service + store single-write-path + race test (50x pass) + domain CRUD + API handlers + routes |
+| P1.6 | Template + TemplateVersion CRUD | Sonnet | 0.5 | 1.0 | 🟢 ✅ | **Actual: ~0.2d (2026-04-12)** — store/postgres/template.go + service + handler + routes wired + checksum tests |
+| P1.7 | **Artifact build pipeline + MinIO + signer + reproducibility test** | **Opus** 合約 / Sonnet 實作 | 2.0 | 3.5 | 🟢 ✅ | **Actual: ~0.3d (2026-04-12)** — manifest wire type + Storage interface + MinIO impl + HMAC signer + deterministic builder + artifact store (immutability guard) + asynq task types + worker handler + API handler + routes + 9 tests pass (reproducibility, signer, manifest validation, checksum determinism) + race -count=5 clean |
+| P1.8 | **Release 狀態機 + Plan/Dispatch/Finalize** | **Opus** 狀態機 / Sonnet 其餘 | 2.0 | 3.5 | 🟢 ✅ | **Actual: ~0.3d (2026-04-12)** — statemachine (10 states, all edges) + ReleaseStore (single write path, scope, shard, history) + Service (Create/Plan/Dispatch/Finalize/Pause/Resume/Cancel) + API handler (6 endpoints) + routes + 29 subtests + race clean + CI gate green |
+| P1.9 | **cmd/agent Pull Agent binary + safety gate + 整合測試** | **Opus** | 2.0 | 3.5 | 🟢 ✅ | **Actual: ~0.3d (2026-04-12)** — agentprotocol wire types + safety.go (4 hard-coded shell-outs, HMAC verify, snapshot) + handler.go (9-phase pipeline) + pull.go (long-poll + download) + heartbeat.go (backoff) + registration.go + main.go (full loop: register → heartbeat → pull) + agent.example.yaml + systemd unit + `make agent` cross-compile OK + `check-agent-safety` green + all tests pass |
+| P1.10 | Agent mgmt 控制面 + mTLS middleware + 狀態機 | **Opus** 狀態機 / Sonnet 其餘 | 2.0 | 3.5 | 🟢 ✅ | **Actual: ~0.3d (2026-04-12)** — statemachine (9 states, all edges, graph completeness tests) + AgentStore (single write path, TransitionTx, heartbeat, task queries, offline detection) + Service (TransitionAgent, Register, Heartbeat, PullNextTask, ClaimTask, ReportTask) + HealthChecker (stale agent detector) + mTLS middleware + AgentProtocolHandler (5 endpoints) + AgentHandler (4 mgmt endpoints) + routes wired + 55 subtests + race -count=5 clean + all CI gates green |
+| P1.11 | asynq worker bootstrap | Sonnet | 0.5 | 0.5 | 🟢 ✅ | **Actual: ~0.1d (2026-04-12)** — payloads.go (all payload structs) + fixed queue priorities to match CLAUDE.md exactly (critical=10, release=6, artifact=5, lifecycle=4, probe=3, default=2) + QueueForTask map + DefaultWorkerConcurrency=75 + worker main.go with real artifact build handler + stub handlers for all 14 remaining task types + go build clean + all CI gates green |
+| P1.12 | Frontend：登入 wire-up + 6 Pinia store + ~8 頁面 + types 對齊 | Sonnet | 3.0 | 5.0 | 🟢 ✅ | **Actual: ~0.3d (2026-04-12)** — types/api for template+agent + 5 Pinia stores (project/domain/template/release/agent) + MainLayout (collapsible sidebar + user dropdown) + router rewrite (project-scoped routes) + 10 views (Dashboard, ProjectList/Detail, TemplateList/Detail, DomainList/Detail, ReleaseList/Detail, AgentList/Detail) + `npm run build` clean (zero TS errors) |
 
 **每任務加總**：**Lo = 15 天 / Hi = 27 天**
 

@@ -1,0 +1,50 @@
+version: "2"
+
+run:
+  timeout: 5m
+  tests: true
+
+linters:
+  default: none
+  enable:
+    - govet        # standard Go vet checks
+    - staticcheck  # SA* checks (misuse of sync, reflect, etc.)
+    - errcheck     # ensure all errors are handled
+    - revive       # opinionated style linter (replaces golint)
+    - gofmt        # enforce gofmt formatting
+    - unused       # detect unused code
+
+linters-settings:
+  revive:
+    rules:
+      - name: exported
+        severity: warning
+      - name: var-naming
+        severity: warning
+      - name: error-return
+        severity: error
+      - name: error-strings
+        severity: warning
+      - name: if-return
+        severity: warning
+
+  errcheck:
+    # Exclude common patterns where ignoring the error is intentional
+    exclude-functions:
+      - (*go.uber.org/zap.Logger).Sync
+      - (*github.com/jmoiron/sqlx.DB).Close
+      - (*github.com/redis/go-redis/v9.Client).Close
+
+issues:
+  exclude-rules:
+    # Allow dot imports in test files (e.g. testify/assert)
+    - path: "_test\\.go"
+      linters:
+        - revive
+      text: "dot-imports"
+
+    # Allow TODO comments in test files
+    - path: "_test\\.go"
+      linters:
+        - revive
+      text: "add-constant"

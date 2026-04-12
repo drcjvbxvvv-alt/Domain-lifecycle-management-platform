@@ -1,0 +1,108 @@
+package router
+
+import (
+	"github.com/gin-gonic/gin"
+
+	"domain-platform/api/handler"
+	"domain-platform/api/middleware"
+	"domain-platform/internal/auth"
+)
+
+// Deps bundles all dependencies needed to register routes.
+type Deps struct {
+	AuthHandler     *handler.AuthHandler
+	ProjectHandler  *handler.ProjectHandler
+	DomainHandler   *handler.DomainHandler
+	TemplateHandler *handler.TemplateHandler
+	ArtifactHandler *handler.ArtifactHandler
+	ReleaseHandler  *handler.ReleaseHandler
+	AgentHandler    *handler.AgentHandler
+	JWTManager      *auth.JWTManager
+}
+
+// RegisterV1 mounts all /api/v1 routes onto the Gin engine.
+func RegisterV1(r *gin.Engine, deps Deps) {
+	v1 := r.Group("/api/v1")
+
+	// ── Public routes (no auth) ────────────────���───────────────────────
+	authGroup := v1.Group("/auth")
+	{
+		authGroup.POST("/login", deps.AuthHandler.Login)
+	}
+
+	// ── Authenticated routes ───────────────────────────────���───────────
+	authed := v1.Group("", middleware.JWTAuth(deps.JWTManager))
+	{
+		authed.GET("/auth/me", deps.AuthHandler.Me)
+
+		// ── Projects ──────────────────────────────────────────────────
+		projects := authed.Group("/projects")
+		{
+			projects.POST("", middleware.RequireAnyRole("admin"), deps.ProjectHandler.Create)
+			projects.GET("", middleware.RequireAnyRole("viewer", "operator", "release_manager", "admin", "auditor"), deps.ProjectHandler.List)
+			projects.GET("/:id", middleware.RequireAnyRole("viewer", "operator", "release_manager", "admin", "auditor"), deps.ProjectHandler.Get)
+			projects.PUT("/:id", middleware.RequireAnyRole("admin"), deps.ProjectHandler.Update)
+			projects.DELETE("/:id", middleware.RequireAnyRole("admin"), deps.ProjectHandler.Delete)
+			// Template sub-routes scoped to a project
+			projects.POST("/:id/templates", middleware.RequireAnyRole("operator", "release_manager", "admin"), deps.TemplateHandler.Create)
+			projects.GET("/:id/templates", middleware.RequireAnyRole("viewer", "operator", "release_manager", "admin", "auditor"), deps.TemplateHandler.List)
+			// Artifact sub-routes scoped to a project
+			projects.GET("/:id/artifacts", middleware.RequireAnyRole("viewer", "operator", "release_manager", "admin", "auditor"), deps.ArtifactHandler.ListByProject)
+			// Release sub-routes scoped to a project
+			projects.GET("/:id/releases", middleware.RequireAnyRole("viewer", "operator", "release_manager", "admin", "auditor"), deps.ReleaseHandler.ListByProject)
+		}
+
+		// ── Domains ───────────────────────────────────────────────────
+		domains := authed.Group("/domains")
+		{
+			domains.POST("", middleware.RequireAnyRole("operator", "release_manager", "admin"), deps.DomainHandler.Register)
+			domains.GET("", middleware.RequireAnyRole("viewer", "operator", "release_manager", "admin", "auditor"), deps.DomainHandler.List)
+			domains.GET("/:id", middleware.RequireAnyRole("viewer", "operator", "release_manager", "admin", "auditor"), deps.DomainHandler.Get)
+			domains.POST("/:id/transition", middleware.RequireAnyRole("operator", "release_manager", "admin"), deps.DomainHandler.Transition)
+			domains.GET("/:id/history", middleware.RequireAnyRole("viewer", "operator", "release_manager", "admin", "auditor"), deps.DomainHandler.History)
+		}
+
+		// ── Templates (individual) ─────────────────────────────────────
+		templates := authed.Group("/templates")
+		{
+			templates.GET("/:id", middleware.RequireAnyRole("viewer", "operator", "release_manager", "admin", "auditor"), deps.TemplateHandler.Get)
+			templates.PUT("/:id", middleware.RequireAnyRole("operator", "release_manager", "admin"), deps.TemplateHandler.Update)
+			templates.DELETE("/:id", middleware.RequireAnyRole("admin"), deps.TemplateHandler.Delete)
+			templates.POST("/:id/versions/publish", middleware.RequireAnyRole("operator", "release_manager", "admin"), deps.TemplateHandler.PublishVersion)
+			templates.GET("/:id/versions", middleware.RequireAnyRole("viewer", "operator", "release_manager", "admin", "auditor"), deps.TemplateHandler.ListVersions)
+		}
+
+		// ── Template versions (individual) ────────────────────────────
+		templateVersions := authed.Group("/template-versions")
+		{
+			templateVersions.GET("/:id", middleware.RequireAnyRole("viewer", "operator", "release_manager", "admin", "auditor"), deps.TemplateHandler.GetVersion)
+			templateVersions.PATCH("/:id", middleware.RequireAnyRole("operator", "release_manager", "admin"), deps.TemplateHandler.UpdateVersion)
+		}
+
+		// ── Artifacts (individual, read-only) ─────────────────────────
+		artifacts := authed.Group("/artifacts")
+		{
+			artifacts.GET("/:id", middleware.RequireAnyRole("viewer", "operator", "release_manager", "admin", "auditor"), deps.ArtifactHandler.Get)
+		}
+
+		// ── Releases ──────────────────────────────────────────────────
+		releases := authed.Group("/releases")
+		{
+			releases.POST("", middleware.RequireAnyRole("operator", "release_manager", "admin"), deps.ReleaseHandler.Create)
+			releases.GET("/:id", middleware.RequireAnyRole("viewer", "operator", "release_manager", "admin", "auditor"), deps.ReleaseHandler.Get)
+			releases.POST("/:id/pause", middleware.RequireAnyRole("operator", "release_manager", "admin"), deps.ReleaseHandler.Pause)
+			releases.POST("/:id/resume", middleware.RequireAnyRole("operator", "release_manager", "admin"), deps.ReleaseHandler.Resume)
+			releases.POST("/:id/cancel", middleware.RequireAnyRole("operator", "release_manager", "admin"), deps.ReleaseHandler.Cancel)
+			releases.GET("/:id/history", middleware.RequireAnyRole("viewer", "operator", "release_manager", "admin", "auditor"), deps.ReleaseHandler.History)
+		}
+
+		// ── Agents (management console, read + transition) ────────────
+		agents := authed.Group("/agents")
+		{
+			agents.GET("", middleware.RequireAnyRole("operator", "release_manager", "admin", "auditor"), deps.AgentHandler.List)
+			agents.GET("/:id", middleware.RequireAnyRole("operator", "release_manager", "admin", "auditor"), deps.AgentHandler.Get)
+			agents.POST("/:id/transition", middleware.RequireAnyRole("admin"), deps.AgentHandler.Transition)
+			agents.GET("/:id/history", middleware.RequireAnyRole("operator", "release_manager", "admin", "auditor"), deps.AgentHandler.History)
+		}
+	}
+}
