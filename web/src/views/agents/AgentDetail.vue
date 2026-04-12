@@ -1,20 +1,47 @@
 <script setup lang="ts">
-import { onMounted } from 'vue'
+import { onMounted, onUnmounted, computed, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import {
   NTabs, NTabPane, NDescriptions, NDescriptionsItem,
-  NAlert, NTimeline, NTimelineItem,
+  NAlert, NTimeline, NTimelineItem, NButton, NSpace, useMessage,
 } from 'naive-ui'
 import { PageHeader, StatusTag, PageHint } from '@/components'
 import { useAgentStore } from '@/stores/agent'
 
-const route = useRoute()
-const store = useAgentStore()
-const id    = route.params.id as string
+const route   = useRoute()
+const store   = useAgentStore()
+const message = useMessage()
+const id      = route.params.id as string
+
+const actionLoading = ref(false)
+
+const canDrain   = computed(() => ['online', 'busy', 'idle'].includes(store.current?.status ?? ''))
+const canDisable = computed(() => !['disabled', 'draining'].includes(store.current?.status ?? ''))
+const canEnable  = computed(() => ['disabled', 'error', 'draining'].includes(store.current?.status ?? ''))
+
+async function doAction(fn: (id: string) => Promise<void>, label: string) {
+  actionLoading.value = true
+  try {
+    await fn(id)
+    message.success(`操作成功：${label}`)
+    await store.fetchHistory(id)
+  } catch (e: any) {
+    message.error(e?.response?.data?.message || '操作失敗')
+  } finally {
+    actionLoading.value = false
+  }
+}
+
+let timer: ReturnType<typeof setInterval> | null = null
 
 onMounted(async () => {
   await store.fetchOne(id)
   await store.fetchHistory(id)
+  timer = setInterval(() => store.fetchOne(id), 10_000)
+})
+
+onUnmounted(() => {
+  if (timer) clearInterval(timer)
 })
 </script>
 
@@ -24,11 +51,33 @@ onMounted(async () => {
       :title="store.current?.hostname ?? '載入中...'"
       :subtitle="store.current?.agent_id ?? 'Agent 詳情'"
     >
+      <template #actions>
+        <NSpace v-if="store.current">
+          <NButton
+            v-if="canDrain"
+            type="warning" ghost
+            :loading="actionLoading"
+            @click="doAction(store.drain, '排空')"
+          >排空</NButton>
+          <NButton
+            v-if="canDisable"
+            type="error" ghost
+            :loading="actionLoading"
+            @click="doAction(store.disable, '停用')"
+          >停用</NButton>
+          <NButton
+            v-if="canEnable"
+            type="primary" ghost
+            :loading="actionLoading"
+            @click="doAction(store.enable, '啟用')"
+          >啟用</NButton>
+        </NSpace>
+      </template>
       <template #hint>
         <PageHint storage-key="agent-detail" title="Agent 詳情說明">
           最後心跳時間超過 30 秒表示連線可能異常；頂部若有紅色提示框代表 Agent 回報了錯誤。<br>
-          <strong>error 狀態</strong>：需排查 Agent 主機問題，確認修復後由管理員手動清除狀態。<br>
-          狀態歷史記錄所有轉換及原因，可用於問題追蹤。
+          <strong>error 狀態</strong>：需排查 Agent 主機問題，確認修復後點擊「啟用」清除狀態。<br>
+          狀態歷史記錄所有轉換及原因，可用於問題追蹤。頁面每 10 秒自動更新狀態。
         </PageHint>
       </template>
     </PageHeader>

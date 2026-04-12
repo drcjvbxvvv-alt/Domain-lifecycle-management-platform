@@ -43,7 +43,7 @@ export const useReleaseStore = defineStore('release', () => {
     history.value = res.data?.items ?? []
   }
 
-  async function create(data: { project_id: number; project_slug: string; template_version_id: number; release_type?: string; description?: string; domain_ids?: number[] }) {
+  async function create(data: { project_id: number; project_slug: string; template_version_id: number; release_type?: string; shard_strategy?: string; description?: string; domain_ids?: number[] }) {
     const res = await releaseApi.create(data) as unknown as ApiResponse<ReleaseResponse>
     return res.data
   }

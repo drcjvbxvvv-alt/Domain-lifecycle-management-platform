@@ -604,7 +604,7 @@ host_group level and implements the nginx reload batching rule.
 
 ---
 
-### P2.6 — Agent fleet management + Release operation UI
+### P2.6 — Agent fleet management + Release operation UI ✅ COMPLETED 2026-04-12
 
 **Owner**: Sonnet
 **Depends on**: P2.5 (backend capabilities), P2.3 (rollback API), P2.4
@@ -699,6 +699,16 @@ and monitor shard-by-shard execution progress.
 - Host group page: edit max_concurrency → saved successfully
 - All pages follow FRONTEND_GUIDE.md conventions
 - `npm run build` succeeds with zero errors
+
+**Delivered (2026-04-12)**:
+
+- `web/src/api/agent.ts` — added `transition(id, { from, to, reason })` method
+- `web/src/stores/agent.ts` — added `transition()`, `drain()`, `disable()`, `enable()` actions; auto-refetch after transition
+- `web/src/views/agents/AgentList.vue` — status filter dropdown, per-row drain/disable/enable buttons (contextual visibility), 10s polling
+- `web/src/views/agents/AgentDetail.vue` — drain/disable/enable action buttons in header, 10s polling, hint text updated
+- `web/src/views/releases/ReleaseDetail.vue` — 5s auto-refresh polling during `executing`/`rolling_back`/`planning`; watch stops polling when terminal state reached
+- `web/src/views/releases/ReleaseList.vue` — added `shard_strategy` selector (by_host_group / single) to create form
+- `web/src/stores/release.ts` — `create()` signature extended with `shard_strategy`
 
 ---
 

@@ -11,4 +11,7 @@ export const agentApi = {
 
   history: (id: number | string, limit = 50) =>
     http.get<{ items: AgentStateHistoryEntry[] }>(`/agents/${id}/history`, { params: { limit } }),
+
+  transition: (id: number | string, body: { from: string; to: string; reason?: string }) =>
+    http.post<AgentResponse>(`/agents/${id}/transition`, body),
 }

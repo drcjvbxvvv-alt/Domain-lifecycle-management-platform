@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, computed, ref, h } from 'vue'
+import { onMounted, onUnmounted, computed, ref, h, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import {
   NTabs, NTabPane, NDescriptions, NDescriptionsItem,
@@ -116,13 +116,39 @@ async function loadDryRun() {
   }
 }
 
+const ACTIVE_STATUSES = new Set(['executing', 'rolling_back', 'planning'])
+
+let timer: ReturnType<typeof setInterval> | null = null
+
+function startPolling() {
+  if (timer) return
+  timer = setInterval(async () => {
+    await store.fetchOne(rid)
+    await store.fetchShards(rid)
+  }, 5_000)
+}
+
+function stopPolling() {
+  if (timer) { clearInterval(timer); timer = null }
+}
+
+watch(() => store.current?.status, (status) => {
+  if (status && ACTIVE_STATUSES.has(status)) startPolling()
+  else stopPolling()
+})
+
 onMounted(async () => {
   await store.fetchOne(rid)
   await Promise.all([
     store.fetchShards(rid),
     store.fetchHistory(rid),
   ])
+  if (store.current?.status && ACTIVE_STATUSES.has(store.current.status)) {
+    startPolling()
+  }
 })
+
+onUnmounted(stopPolling)
 </script>
 
 <template>

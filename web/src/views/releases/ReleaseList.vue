@@ -26,6 +26,7 @@ const form = ref({
   project_slug: '',
   template_version_id: null as number | null,
   release_type: 'html',
+  shard_strategy: 'by_host_group',
   description: '',
 })
 
@@ -33,6 +34,11 @@ const releaseTypeOptions = [
   { label: 'HTML', value: 'html' },
   { label: 'Nginx', value: 'nginx' },
   { label: 'Full', value: 'full' },
+]
+
+const shardStrategyOptions = [
+  { label: 'By Host Group（預設）', value: 'by_host_group' },
+  { label: 'Single Shard',         value: 'single' },
 ]
 
 const columns: DataTableColumns<ReleaseResponse> = [
@@ -57,6 +63,7 @@ function openCreate() {
     project_slug: '',
     template_version_id: null,
     release_type: 'html',
+    shard_strategy: 'by_host_group',
     description: '',
   }
   showCreate.value = true
@@ -77,6 +84,7 @@ async function handleCreate() {
       project_slug: form.value.project_slug,
       template_version_id: form.value.template_version_id,
       release_type: form.value.release_type,
+      shard_strategy: form.value.shard_strategy,
       description: form.value.description || undefined,
     })
     message.success('發布建立成功')
@@ -133,6 +141,9 @@ onMounted(() => {
           </NFormItem>
           <NFormItem label="發布類型">
             <NSelect v-model:value="form.release_type" :options="releaseTypeOptions" />
+          </NFormItem>
+          <NFormItem label="Shard 策略">
+            <NSelect v-model:value="form.shard_strategy" :options="shardStrategyOptions" />
           </NFormItem>
           <NFormItem label="說明">
             <NInput v-model:value="form.description" type="textarea" placeholder="發布說明（選填）" :rows="3" />

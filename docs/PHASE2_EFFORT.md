@@ -41,7 +41,7 @@ Phase 1 以後的所有估計都基於這個係數：**「一張複雜任務 ≈
 | P2.3 | **Rollback execution** | **Opus** | 0.5 | 1.5 | 🟢 ✅ | **Actual: ~0.3d (2026-04-12)** — rollback.go + RollbackStore + GetLastSucceeded + ExecuteRollback + HandleRollback + agent handleRollback/restoreFromSnapshot + API endpoint + ConfirmModal |
 | P2.4 | **Dry-run / Diff preview** | Sonnet | 0.3 | 1.0 | 🟢 ✅ | **Actual: ~0.2d (2026-04-12)** — dryrun.go + Storage interface (ListObjects/GetObjectContent) + MinIO impl + API endpoint + TypeScript types + frontend Dry Run tab |
 | P2.5 | **Per-host concurrency control** | Sonnet | 0.3 | 1.0 | 🟢 ✅ | **Actual: ~0.2d (2026-04-12)** — DB-based concurrency check in NextPendingTask；applyReloadBatching() in dispatcher.go；DeferReload in TaskEnvelope；HostGroupStore；host-groups API + frontend page |
-| P2.6 | **Agent fleet management UI + Release 操作 UI** | Sonnet | 0.5 | 1.5 | 🟡 | 最大的 UI 任務：agent drain/enable/disable 操作面板、fleet 狀態頁、release detail 操作按鈕已大部分在 P2.3/P2.4 完成，剩餘以 fleet page 為主 |
+| P2.6 | **Agent fleet management UI + Release 操作 UI** | Sonnet | 0.5 | 1.5 | 🟢 ✅ | **Actual: ~0.2d (2026-04-12)** — AgentList status filter + drain/disable/enable buttons + 10s polling；AgentDetail action buttons + polling；ReleaseDetail 5s auto-refresh polling (executing/rolling_back/planning)；ReleaseList shard_strategy selector |
 | P2.7 | **DNS provider：Cloudflare 實作** | Sonnet | 0.3 | 1.0 | 🟡 | cloudflare-go client + Provider interface impl + registry + lifecycle module hook；炸點：Cloudflare API rate limiting + zone/record 型別對齊 |
 | P2.8 | **E2E integration test + documentation** | Sonnet | 0.5 | 1.5 | 🟡 | docker-compose full-stack test (server + worker + agent binary + mock Nginx) + PHASE2_TASKLIST 所有 Acceptance 條件驗收；炸點：agent binary 跑在 container 內的 mTLS 路徑 |
 
@@ -84,28 +84,28 @@ Phase 1 以後的所有估計都基於這個係數：**「一張複雜任務 ≈
 | P2.2 Multi-shard release splitting | 2026-04-12 | ~0.2 天 |
 | P2.3 Rollback execution | 2026-04-12 | ~0.3 天 |
 | P2.4 Dry-run / Diff preview | 2026-04-12 | ~0.2 天 |
+| P2.5 Per-host concurrency control | 2026-04-12 | ~0.2 天 |
+| P2.6 Agent fleet mgmt + Release UI | 2026-04-12 | ~0.2 天 |
 
-**已消耗**：~1 天。**剩餘**：P2.5 → P2.8。
+**已消耗**：~1.2 天。**剩餘**：P2.7、P2.8。
 
 ---
 
 ## 剩餘任務依賴圖
 
 ```
-P2.5 (Per-host concurrency) — 依賴 P2.2 ✅
-  └─▶ P2.6 (Fleet mgmt UI)  — 依賴 P2.5, P2.3 ✅, P2.4 ✅
+P2.5 ✅ (Per-host concurrency) — 依賴 P2.2 ✅
+  └─▶ P2.6 ✅ (Fleet mgmt UI)  — 依賴 P2.5 ✅, P2.3 ✅, P2.4 ✅
         └─▶ P2.8 (E2E tests)
 
 P2.7 (DNS provider)         — 獨立，隨時可做
 ```
 
-### 建議順序
+### 建議順序（剩餘）
 
 ```
-Session 1 : P2.5 Per-host concurrency (P2.5 本身就是 P2.6 的先決條件)
-Session 2 : P2.7 Cloudflare DNS (獨立任務，插縫做)
-Session 3 : P2.6 Agent fleet mgmt UI
-Session 4 : P2.8 E2E integration tests + doc cleanup
+Session 1 : P2.7 Cloudflare DNS (獨立任務)
+Session 2 : P2.8 E2E integration tests + doc cleanup
 ```
 
 ---
