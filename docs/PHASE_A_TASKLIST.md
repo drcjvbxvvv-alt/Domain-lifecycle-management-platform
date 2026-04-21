@@ -1095,6 +1095,18 @@ API sync for bulk domain onboarding.
 - `go test ./internal/importer/...` passes
 - Large CSV (1000 rows) completes within 60 seconds
 
+**Status**: ✅ COMPLETED 2026-04-21
+
+**Implementation notes**:
+- CSV parser (`internal/importer/service.go::ParseCSV`) is pure function — no DB, fully unit-testable
+- Dedup uses a single `ExistingFQDNs` batch query rather than per-row SELECT
+- `raw_csv TEXT` column added to `domain_import_jobs` (pre-launch edit to migration)
+- Worker re-parses the stored CSV so the job is self-contained (survives restarts)
+- Progress updated every 100 rows for live UI counters
+- Preview endpoint (`POST /domains/import/preview`) parses without persisting — powers Step 1 of wizard
+- Frontend: 5-step wizard + separate ImportHistory page; polling every 2 s stops on terminal status
+- `activeKey` sidebar sorting fixed to longest-first so `/domains/import/history` highlights correctly
+
 ---
 
 ## Phase A Effort Estimate
@@ -1108,7 +1120,7 @@ API sync for bulk domain onboarding.
 | PA.5 | Fee Schedule + Cost | Sonnet | 1.0 | 2.0 | 🟢 | Auto-calculation needs careful testing |
 | PA.6 | Tags + Bulk Ops | Sonnet | 1.5 | 2.5 | 🟢 | Bulk update needs transaction safety |
 | PA.7 | Expiry Dashboard + Alerts | **Opus** | 1.5 | 3.0 | 🟡 | Notification batching + dedup logic |
-| PA.8 | Import Queue | Sonnet | 1.5 | 2.5 | 🟡 | CSV parsing edge cases; large file handling |
+| PA.8 | Import Queue | Sonnet | 1.5 | 2.5 | 🟢 | CSV parsing edge cases; large file handling |
 
 **Task sum**: Lo = 11.5 days / Hi = 20.5 days
 

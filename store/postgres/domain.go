@@ -565,6 +565,31 @@ func (s *DomainStore) GetStats(ctx context.Context, projectID *int64) (*DomainSt
 }
 
 // ListExpiring returns domains expiring within the given number of days.
+// ExistingFQDNs returns the subset of the given FQDNs that already exist
+// (non-retired) in the specified project. Used by the importer for dedup.
+func (s *DomainStore) ExistingFQDNs(ctx context.Context, projectID int64, fqdns []string) (map[string]struct{}, error) {
+	if len(fqdns) == 0 {
+		return map[string]struct{}{}, nil
+	}
+	query, args, err := sqlx.In(
+		`SELECT fqdn FROM domains WHERE project_id = ? AND fqdn IN (?) AND deleted_at IS NULL AND lifecycle_state != 'retired'`,
+		projectID, fqdns,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("build existing fqdns query: %w", err)
+	}
+	query = s.db.Rebind(query)
+	var found []string
+	if err := s.db.SelectContext(ctx, &found, query, args...); err != nil {
+		return nil, fmt.Errorf("existing fqdns: %w", err)
+	}
+	set := make(map[string]struct{}, len(found))
+	for _, f := range found {
+		set[f] = struct{}{}
+	}
+	return set, nil
+}
+
 func (s *DomainStore) ListExpiring(ctx context.Context, days int) ([]Domain, error) {
 	var domains []Domain
 	err := s.db.SelectContext(ctx, &domains,

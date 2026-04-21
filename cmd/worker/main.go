@@ -14,6 +14,8 @@ import (
 	"domain-platform/internal/artifact"
 	"domain-platform/internal/bootstrap"
 	domainsvc "domain-platform/internal/domain"
+	importsvc "domain-platform/internal/importer"
+	"domain-platform/internal/lifecycle"
 	"domain-platform/internal/release"
 	sslsvc "domain-platform/internal/ssl"
 	"domain-platform/internal/tasks"
@@ -92,6 +94,11 @@ func main() {
 	asynqClient := bootstrap.NewAsynqClient(cfg.Redis)
 	defer asynqClient.Close()
 
+	lifecycleStore := postgres.NewLifecycleStore(db)
+	lifecycleSvc := lifecycle.NewService(domainStore, lifecycleStore, logger)
+	importJobStore := postgres.NewImportJobStore(db)
+	importSvc := importsvc.NewService(importJobStore, domainStore, lifecycleSvc, asynqClient, logger)
+
 	// Release service (needed by release handlers + artifact build callback)
 	releaseSvc := release.NewService(
 		releaseStore, domainStore, templateStore, agentStore, artifactStore,
@@ -119,6 +126,7 @@ func main() {
 	mux.Handle(tasks.TypeSSLCheckExpiry, sslCheckHandler)
 	mux.Handle(tasks.TypeSSLCheckAllActive, sslCheckAllHandler)
 	mux.Handle(tasks.TypeDomainExpiryCheck, expiryCheckHandler)
+	mux.HandleFunc(tasks.TypeDomainImport, importSvc.HandleDomainImport)
 
 	// ── Stub handlers (log payload, return nil) ───────────────────────────
 	// These will be replaced by real implementations in P2+.

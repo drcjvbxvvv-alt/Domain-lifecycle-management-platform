@@ -245,6 +245,7 @@ onMounted(async () => {
         <NButton type="primary" :disabled="!selectedProjectId" @click="openCreate">
           註冊域名
         </NButton>
+        <NButton @click="router.push('/domains/import')">批次匯入</NButton>
         <NButton :disabled="!selectedProjectId" @click="handleExport">匯出 CSV</NButton>
       </template>
       <template #hint>

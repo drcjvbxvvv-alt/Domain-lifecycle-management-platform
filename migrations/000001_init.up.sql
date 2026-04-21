@@ -756,6 +756,7 @@ CREATE TABLE domain_import_jobs (
     skipped_count        INT NOT NULL DEFAULT 0,
     failed_count         INT NOT NULL DEFAULT 0,
     error_details        JSONB,
+    raw_csv              TEXT,                         -- original uploaded CSV content
     created_by           BIGINT REFERENCES users(id),
     started_at           TIMESTAMPTZ,
     completed_at         TIMESTAMPTZ,

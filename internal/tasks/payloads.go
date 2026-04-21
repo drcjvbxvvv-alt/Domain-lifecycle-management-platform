@@ -96,6 +96,14 @@ type ProbeRunPayload struct {
 	Level     int      `json:"level"` // 1, 2, or 3
 }
 
+// ── Domain Import ─────────────────────────────────────────────────────────────
+
+// DomainImportPayload is the payload for TypeDomainImport.
+// The raw CSV content is stored in the job row; this payload just carries the job ID.
+type DomainImportPayload struct {
+	JobID int64 `json:"job_id"`
+}
+
 // ── Notify ────────────────────────────────────────────────────────────────────
 
 // NotifySendPayload is the payload for TypeNotifySend.

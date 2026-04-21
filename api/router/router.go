@@ -24,6 +24,7 @@ type Deps struct {
 	CostHandler        *handler.CostHandler
 	TagHandler         *handler.TagHandler
 	ExpiryHandler      *handler.ExpiryHandler
+	ImportHandler      *handler.ImportHandler
 	JWTManager         *auth.JWTManager
 }
 
@@ -77,6 +78,11 @@ func RegisterV1(r *gin.Engine, deps Deps) {
 			domains.GET("/stats", middleware.RequireAnyRole("viewer", "operator", "release_manager", "admin", "auditor"), deps.DomainHandler.Stats)
 			domains.POST("/bulk", middleware.RequireAnyRole("operator", "release_manager", "admin"), deps.TagHandler.BulkAction)
 			domains.GET("/export", middleware.RequireAnyRole("operator", "release_manager", "admin", "auditor"), deps.TagHandler.Export)
+			// Import routes (static, before /:id)
+			domains.POST("/import", middleware.RequireAnyRole("operator", "release_manager", "admin"), deps.ImportHandler.Upload)
+			domains.POST("/import/preview", middleware.RequireAnyRole("operator", "release_manager", "admin"), deps.ImportHandler.Preview)
+			domains.GET("/import/jobs", middleware.RequireAnyRole("viewer", "operator", "release_manager", "admin", "auditor"), deps.ImportHandler.ListJobs)
+			domains.GET("/import/jobs/:jobid", middleware.RequireAnyRole("viewer", "operator", "release_manager", "admin", "auditor"), deps.ImportHandler.GetJob)
 			// Parameterized routes
 			domains.GET("/:id", middleware.RequireAnyRole("viewer", "operator", "release_manager", "admin", "auditor"), deps.DomainHandler.Get)
 			domains.PUT("/:id", middleware.RequireAnyRole("operator", "release_manager", "admin"), deps.DomainHandler.UpdateAsset)

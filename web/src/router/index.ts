@@ -87,6 +87,19 @@ const router = createRouter({
           component: () => import('@/views/domains/DomainList.vue'),
           meta: { title: '域名列表', minRole: 'viewer' },
         },
+        // Import routes (static — must be before :id)
+        {
+          path: 'domains/import',
+          name: 'ImportWizard',
+          component: () => import('@/views/domains/ImportWizard.vue'),
+          meta: { title: '批次匯入', minRole: 'operator' },
+        },
+        {
+          path: 'domains/import/history',
+          name: 'ImportHistory',
+          component: () => import('@/views/domains/ImportHistory.vue'),
+          meta: { title: '匯入歷史', minRole: 'viewer' },
+        },
         {
           path: 'domains/:id',
           name: 'DomainDetail',

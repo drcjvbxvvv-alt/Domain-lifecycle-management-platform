@@ -23,6 +23,7 @@ import (
 	costsvc "domain-platform/internal/cost"
 	domainsvc "domain-platform/internal/domain"
 	"domain-platform/internal/dnsprovider"
+	importsvc "domain-platform/internal/importer"
 	"domain-platform/internal/lifecycle"
 	"domain-platform/internal/project"
 	"domain-platform/internal/registrar"
@@ -127,6 +128,10 @@ func main() {
 	expirySvc := domainsvc.NewExpiryService(domainStore, logger)
 	expiryHandler := handler.NewExpiryHandler(expirySvc, logger)
 
+	importJobStore := postgres.NewImportJobStore(db)
+	importSvc := importsvc.NewService(importJobStore, domainStore, lifecycleSvc, asynqClient, logger)
+	importHandler := handler.NewImportHandler(importSvc, logger)
+
 	// ── Management API listener (:8080, JWT auth) ──────────────────────────
 	mgmtRouter := buildManagementRouter(logger, router.Deps{
 		AuthHandler:        authHandler,
@@ -143,6 +148,7 @@ func main() {
 		CostHandler:        costHandler,
 		TagHandler:         tagHandler,
 		ExpiryHandler:      expiryHandler,
+		ImportHandler:      importHandler,
 		JWTManager:         jwtMgr,
 	})
 	mgmtAddr := fmt.Sprintf("%s:%d", cfg.Server.Host, cfg.Server.Port)

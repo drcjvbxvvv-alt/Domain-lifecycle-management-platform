@@ -34,6 +34,9 @@ const (
 	TypeSSLCheckExpiry    = "ssl:check_expiry"     // single domain TLS probe + upsert
 	TypeSSLCheckAllActive = "ssl:check_all_active" // batch: enqueue TypeSSLCheckExpiry per active domain
 
+	// Domain import
+	TypeDomainImport = "domain:import" // process a domain_import_jobs row row-by-row
+
 	// Notify
 	TypeNotifySend = "notify:send"
 )
