@@ -7,12 +7,21 @@ import type { VNodeChild } from 'vue'
 import { useDNSRecordStore } from '@/stores/dnsrecord'
 import type { ManagedRecord, ValidationError } from '@/types/dnsrecord'
 import { validateRecord, planTotalChanges } from '@/types/dnsrecord'
+import type { DomainPermissionLevel } from '@/types/permission'
+import { hasPermission } from '@/types/permission'
 
 const props = defineProps<{
   domainId: number
   fqdn: string
   hasDnsProvider: boolean
+  /** Caller's effective permission on this domain. Empty = no access. */
+  myPermission?: DomainPermissionLevel | ''
 }>()
+
+/** Whether the current user can edit records (editor or above). */
+const canEdit = () => hasPermission(props.myPermission ?? '', 'editor')
+/** Whether the current user can apply plans (admin only). */
+const canApply = () => hasPermission(props.myPermission ?? '', 'admin')
 
 const message  = useMessage()
 const dnsStore = useDNSRecordStore()
@@ -264,27 +273,30 @@ const columns = computed<DataTableColumns<ManagedRecord>>(() => [
 
       const btns = []
 
-      // Can't edit a delete-staged record
-      if (row._action !== 'delete' && row.id) {
-        btns.push(h(NButton, {
-          size: 'small', quaternary: true,
-          onClick: () => startEdit(row),
-        }, { default: () => '編輯' }))
-      }
+      // Edit/delete only available to editors and above
+      if (canEdit()) {
+        // Can't edit a delete-staged record
+        if (row._action !== 'delete' && row.id) {
+          btns.push(h(NButton, {
+            size: 'small', quaternary: true,
+            onClick: () => startEdit(row),
+          }, { default: () => '編輯' }))
+        }
 
-      if (row._action === 'delete') {
-        btns.push(h(NButton, {
-          size: 'small', quaternary: true, type: 'warning',
-          onClick: () => handleStageDelete(row),
-        }, { default: () => '復原' }))
-      } else {
-        btns.push(h(NPopconfirm,
-          { onPositiveClick: () => handleStageDelete(row) },
-          {
-            trigger: () => h(NButton, { size: 'small', quaternary: true, type: 'error' }, { default: () => '刪除' }),
-            default: () => `暫存刪除 ${row.type} 記錄？（套用前可復原）`,
-          },
-        ))
+        if (row._action === 'delete') {
+          btns.push(h(NButton, {
+            size: 'small', quaternary: true, type: 'warning',
+            onClick: () => handleStageDelete(row),
+          }, { default: () => '復原' }))
+        } else {
+          btns.push(h(NPopconfirm,
+            { onPositiveClick: () => handleStageDelete(row) },
+            {
+              trigger: () => h(NButton, { size: 'small', quaternary: true, type: 'error' }, { default: () => '刪除' }),
+              default: () => `暫存刪除 ${row.type} 記錄？（套用前可復原）`,
+            },
+          ))
+        }
       }
 
       return h('div', { style: 'display:flex;gap:4px' }, btns)
@@ -328,6 +340,7 @@ function changeType(action: string): 'success' | 'warning' | 'error' {
           重新載入
         </NButton>
         <NButton
+          v-if="canEdit()"
           type="primary"
           size="small"
           @click="showCreateForm = true"
@@ -337,15 +350,21 @@ function changeType(action: string): 'success' | 'warning' | 'error' {
 
         <div style="flex:1" />
 
-        <!-- Pending changes indicator -->
-        <template v-if="dnsStore.hasPendingChanges">
+        <!-- Pending changes indicator (editor can stage; apply requires admin) -->
+        <template v-if="dnsStore.hasPendingChanges && canEdit()">
           <NTag type="warning" size="small" :bordered="false">
             {{ dnsStore.pendingChanges.length }} 項待套用
           </NTag>
           <NButton size="small" @click="handleDiscard">捨棄全部</NButton>
-          <NButton size="small" type="primary" @click="openPlanModal">
+          <NButton v-if="canApply()" size="small" type="primary" @click="openPlanModal">
             預覽 &amp; 套用
           </NButton>
+          <NTooltip v-else trigger="hover">
+            <template #trigger>
+              <NButton size="small" type="primary" disabled>預覽 &amp; 套用</NButton>
+            </template>
+            需要域名 admin 權限才能套用變更
+          </NTooltip>
         </template>
       </div>
 

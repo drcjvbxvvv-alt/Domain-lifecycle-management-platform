@@ -770,6 +770,27 @@ CREATE TABLE domain_import_jobs (
 );
 
 -- ============================================================
+-- DOMAIN PERMISSIONS (Zone-Level RBAC)                      [PB.6]
+-- ============================================================
+-- Per-domain permission grants for individual users.
+-- Access resolution: global role (via user_roles) takes precedence,
+-- then domain-level permission. Highest permission wins.
+CREATE TABLE domain_permissions (
+    id          BIGSERIAL PRIMARY KEY,
+    domain_id   BIGINT NOT NULL REFERENCES domains(id) ON DELETE CASCADE,
+    user_id     BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    permission  VARCHAR(32) NOT NULL DEFAULT 'viewer', -- viewer, editor, admin
+    granted_by  BIGINT REFERENCES users(id),
+    granted_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT uq_domain_permissions UNIQUE (domain_id, user_id),
+    CONSTRAINT chk_domain_permission CHECK (
+        permission IN ('viewer', 'editor', 'admin')
+    )
+);
+CREATE INDEX idx_domain_permissions_domain ON domain_permissions (domain_id);
+CREATE INDEX idx_domain_permissions_user   ON domain_permissions (user_id);
+
+-- ============================================================
 -- SEED DATA                                                  [P1]
 -- ============================================================
 -- Five roles per ADR-0003 D7

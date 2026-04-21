@@ -140,6 +140,10 @@ func main() {
 	dnsRecordSvc := dnsrecsvc.NewService(dnsProviderStore, domainStore, logger)
 	dnsRecordHandler := handler.NewDNSRecordHandler(dnsRecordSvc, lifecycleSvc, logger)
 
+	domainPermStore := postgres.NewDomainPermissionStore(db)
+	permSvc := domainsvc.NewPermissionService(domainPermStore, roleStore, logger)
+	domainPermHandler := handler.NewDomainPermissionHandler(permSvc, logger)
+
 	// ── Management API listener (:8080, JWT auth) ──────────────────────────
 	mgmtRouter := buildManagementRouter(logger, router.Deps{
 		AuthHandler:        authHandler,
@@ -157,9 +161,11 @@ func main() {
 		TagHandler:         tagHandler,
 		ExpiryHandler:      expiryHandler,
 		ImportHandler:      importHandler,
-		DNSQueryHandler:    dnsQueryHandler,
-		DNSRecordHandler:   dnsRecordHandler,
-		JWTManager:         jwtMgr,
+		DNSQueryHandler:         dnsQueryHandler,
+		DNSRecordHandler:        dnsRecordHandler,
+		DomainPermissionHandler: domainPermHandler,
+		PermissionChecker:       permSvc,
+		JWTManager:              jwtMgr,
 	})
 	mgmtAddr := fmt.Sprintf("%s:%d", cfg.Server.Host, cfg.Server.Port)
 	mgmtServer := &http.Server{

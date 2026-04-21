@@ -12,6 +12,7 @@ import {
 } from 'naive-ui'
 import { PageHeader, StatusTag, ConfirmModal, PageHint } from '@/components'
 import DomainDNS from '@/views/domains/DomainDNS.vue'
+import DomainPermissions from '@/views/domains/DomainPermissions.vue'
 import { useDomainStore } from '@/stores/domain'
 import { useRegistrarStore } from '@/stores/registrar'
 import { useDNSProviderStore } from '@/stores/dnsprovider'
@@ -20,6 +21,9 @@ import { useCostStore } from '@/stores/cost'
 import { useTagStore } from '@/stores/tag'
 import { domainApi } from '@/api/domain'
 import { dnsApi } from '@/api/dns'
+import { permissionApi } from '@/api/permission'
+import type { DomainPermissionLevel } from '@/types/permission'
+import { useAuthStore } from '@/stores/auth'
 import type { DomainLifecycleHistoryEntry, UpdateDomainAssetRequest } from '@/types/domain'
 import type { DNSRecord, DNSLookupResult, PropagationResult, DriftResult } from '@/types/dns'
 import type { SSLCertResponse } from '@/types/ssl'
@@ -35,10 +39,24 @@ const sslStore  = useSSLStore()
 const costStore = useCostStore()
 const tagStore  = useTagStore()
 const message   = useMessage()
+const authStore = useAuthStore()
 
 // domain ID from route (numeric)
 const idParam = route.params.id as string
 const domainId = Number(idParam)
+
+// ── Domain-level permission ───────────────────────────────────────────────────
+const myPermission = ref<DomainPermissionLevel | ''>('')
+const isAdmin = () => authStore.user?.roles?.includes('admin') || authStore.user?.roles?.includes('release_manager')
+
+async function fetchMyPermission() {
+  try {
+    const res = await permissionApi.myPermission(domainId)
+    myPermission.value = res.data.permission
+  } catch {
+    // fail-open: keep empty (no domain-level permission)
+  }
+}
 
 const history       = ref<DomainLifecycleHistoryEntry[]>([])
 const actionLoading = ref(false)
@@ -542,6 +560,7 @@ onMounted(async () => {
     costStore.fetchDomainCosts(domainId),
     tagStore.fetchList(),
     tagStore.fetchDomainTags(domainId),
+    fetchMyPermission(),
   ])
 })
 </script>
@@ -768,6 +787,7 @@ onMounted(async () => {
                 :domain-id="domainId"
                 :fqdn="store.current.fqdn"
                 :has-dns-provider="!!store.current.dns_provider_id"
+                :my-permission="myPermission"
               />
             </div>
           </NTabPane>
@@ -929,6 +949,16 @@ onMounted(async () => {
                 size="small"
                 :max-height="320"
                 scroll-x="760"
+              />
+            </div>
+          </NTabPane>
+
+          <!-- Permissions tab (visible to admin/release_manager) -->
+          <NTabPane v-if="isAdmin() || myPermission === 'admin'" name="permissions" tab="域名權限">
+            <div class="tab-section">
+              <DomainPermissions
+                :domain-id="domainId"
+                :my-permission="myPermission"
               />
             </div>
           </NTabPane>

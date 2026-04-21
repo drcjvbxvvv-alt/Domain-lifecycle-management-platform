@@ -25,9 +25,11 @@ type Deps struct {
 	TagHandler         *handler.TagHandler
 	ExpiryHandler      *handler.ExpiryHandler
 	ImportHandler      *handler.ImportHandler
-	DNSQueryHandler    *handler.DNSQueryHandler
-	DNSRecordHandler   *handler.DNSRecordHandler
-	JWTManager         *auth.JWTManager
+	DNSQueryHandler          *handler.DNSQueryHandler
+	DNSRecordHandler         *handler.DNSRecordHandler
+	DomainPermissionHandler  *handler.DomainPermissionHandler
+	PermissionChecker        middleware.DNSPermissionChecker
+	JWTManager               *auth.JWTManager
 }
 
 // RegisterV1 mounts all /api/v1 routes onto the Gin engine.
@@ -101,11 +103,16 @@ func RegisterV1(r *gin.Engine, deps Deps) {
 			domains.GET("/:id/dns-records", middleware.RequireAnyRole("viewer", "operator", "release_manager", "admin", "auditor"), deps.DNSQueryHandler.LookupByDomain)
 			domains.GET("/:id/dns-propagation", middleware.RequireAnyRole("viewer", "operator", "release_manager", "admin", "auditor"), deps.DNSQueryHandler.PropagationByDomain)
 			domains.GET("/:id/dns-drift", middleware.RequireAnyRole("viewer", "operator", "release_manager", "admin", "auditor"), deps.DNSQueryHandler.DriftCheck)
-			// DNS record management via provider API
-			domains.GET("/:id/provider-records", middleware.RequireAnyRole("viewer", "operator", "release_manager", "admin", "auditor"), deps.DNSRecordHandler.ListRecords)
-			domains.POST("/:id/provider-records", middleware.RequireAnyRole("operator", "release_manager", "admin"), deps.DNSRecordHandler.CreateRecord)
-			domains.PUT("/:id/provider-records/:rid", middleware.RequireAnyRole("operator", "release_manager", "admin"), deps.DNSRecordHandler.UpdateRecord)
-			domains.DELETE("/:id/provider-records/:rid", middleware.RequireAnyRole("operator", "release_manager", "admin"), deps.DNSRecordHandler.DeleteRecord)
+			// DNS record management via provider API (zone-level RBAC)
+			domains.GET("/:id/provider-records", middleware.RequireDNSPermission(deps.PermissionChecker, "viewer"), deps.DNSRecordHandler.ListRecords)
+			domains.POST("/:id/provider-records", middleware.RequireDNSPermission(deps.PermissionChecker, "editor"), deps.DNSRecordHandler.CreateRecord)
+			domains.PUT("/:id/provider-records/:rid", middleware.RequireDNSPermission(deps.PermissionChecker, "editor"), deps.DNSRecordHandler.UpdateRecord)
+			domains.DELETE("/:id/provider-records/:rid", middleware.RequireDNSPermission(deps.PermissionChecker, "editor"), deps.DNSRecordHandler.DeleteRecord)
+			// Domain permissions (zone-level RBAC management)
+			domains.GET("/:id/my-permission", deps.DomainPermissionHandler.MyPermission)
+			domains.GET("/:id/permissions", middleware.RequireDNSPermission(deps.PermissionChecker, "viewer"), deps.DomainPermissionHandler.List)
+			domains.POST("/:id/permissions", middleware.RequireDNSPermission(deps.PermissionChecker, "admin"), deps.DomainPermissionHandler.Grant)
+			domains.DELETE("/:id/permissions/:user_id", middleware.RequireDNSPermission(deps.PermissionChecker, "admin"), deps.DomainPermissionHandler.Revoke)
 		}
 
 		// ── Templates (individual) ─────────────────────────────────────

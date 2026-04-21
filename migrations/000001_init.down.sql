@@ -23,6 +23,7 @@ DROP TABLE IF EXISTS host_groups           CASCADE;
 DROP TABLE IF EXISTS artifacts             CASCADE;
 DROP TABLE IF EXISTS template_versions     CASCADE;
 DROP TABLE IF EXISTS templates             CASCADE;
+DROP TABLE IF EXISTS domain_permissions      CASCADE;
 DROP TABLE IF EXISTS domain_import_jobs     CASCADE;
 DROP TABLE IF EXISTS domain_tags            CASCADE;
 DROP TABLE IF EXISTS tags                   CASCADE;
