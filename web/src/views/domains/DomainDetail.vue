@@ -650,7 +650,7 @@ onMounted(async () => {
                 <NDataTable
                   :columns="dnsColumns"
                   :data="dnsResult.records"
-                  :row-key="(_r: DNSRecord, i: number) => i"
+                  :row-key="(r: DNSRecord) => `${r.type}-${r.value}`"
                   size="small"
                   :max-height="400"
                   striped
