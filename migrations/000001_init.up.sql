@@ -65,7 +65,54 @@ CREATE TABLE projects (
 );
 
 -- ============================================================
--- DOMAINS (Domain Lifecycle module)                          [P1]
+-- REGISTRARS & DNS PROVIDERS (Domain Asset Layer)            [PA]
+-- ============================================================
+CREATE TABLE registrars (
+    id            BIGSERIAL PRIMARY KEY,
+    uuid          UUID NOT NULL DEFAULT gen_random_uuid(),
+    name          VARCHAR(128) NOT NULL,
+    url           VARCHAR(512),
+    api_type      VARCHAR(64),
+    capabilities  JSONB NOT NULL DEFAULT '{}',
+    notes         TEXT,
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    deleted_at    TIMESTAMPTZ,
+    CONSTRAINT uq_registrars_name UNIQUE (name)
+);
+
+CREATE TABLE registrar_accounts (
+    id              BIGSERIAL PRIMARY KEY,
+    uuid            UUID NOT NULL DEFAULT gen_random_uuid(),
+    registrar_id    BIGINT NOT NULL REFERENCES registrars(id),
+    account_name    VARCHAR(256) NOT NULL,
+    owner_user_id   BIGINT REFERENCES users(id),
+    credentials     JSONB NOT NULL DEFAULT '{}',
+    is_default      BOOLEAN NOT NULL DEFAULT false,
+    notes           TEXT,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    deleted_at      TIMESTAMPTZ,
+    CONSTRAINT uq_registrar_accounts UNIQUE (registrar_id, account_name)
+);
+CREATE INDEX idx_registrar_accounts_registrar ON registrar_accounts (registrar_id) WHERE deleted_at IS NULL;
+
+CREATE TABLE dns_providers (
+    id            BIGSERIAL PRIMARY KEY,
+    uuid          UUID NOT NULL DEFAULT gen_random_uuid(),
+    name          VARCHAR(128) NOT NULL,
+    provider_type VARCHAR(64) NOT NULL,
+    config        JSONB NOT NULL DEFAULT '{}',
+    credentials   JSONB NOT NULL DEFAULT '{}',
+    notes         TEXT,
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    deleted_at    TIMESTAMPTZ,
+    CONSTRAINT uq_dns_providers_name UNIQUE (name)
+);
+
+-- ============================================================
+-- DOMAINS (Domain Lifecycle + Asset Layer)                   [P1+PA]
 -- ============================================================
 CREATE TABLE domains (
     id              BIGSERIAL PRIMARY KEY,
@@ -74,18 +121,74 @@ CREATE TABLE domains (
     fqdn            VARCHAR(253) NOT NULL,
     lifecycle_state VARCHAR(20) NOT NULL DEFAULT 'requested',
     owner_user_id   BIGINT REFERENCES users(id),
-    dns_provider    VARCHAR(32),
-    dns_zone        VARCHAR(253),
+
+    -- Asset: Registration & Provider binding
+    tld                     VARCHAR(64),
+    registrar_account_id    BIGINT REFERENCES registrar_accounts(id),
+    dns_provider_id         BIGINT REFERENCES dns_providers(id),
+
+    -- Asset: Registration dates & Expiry
+    registration_date       DATE,
+    expiry_date             DATE,
+    auto_renew              BOOLEAN NOT NULL DEFAULT false,
+    grace_end_date          DATE,
+    expiry_status           VARCHAR(32),
+
+    -- Asset: Status flags (orthogonal to lifecycle_state)
+    transfer_lock           BOOLEAN NOT NULL DEFAULT true,
+    hold                    BOOLEAN NOT NULL DEFAULT false,
+
+    -- Asset: Transfer tracking
+    transfer_status             VARCHAR(32),
+    transfer_gaining_registrar  VARCHAR(128),
+    transfer_requested_at       TIMESTAMPTZ,
+    transfer_completed_at       TIMESTAMPTZ,
+    last_transfer_at            TIMESTAMPTZ,
+    last_renewed_at             TIMESTAMPTZ,
+
+    -- Asset: DNS infrastructure
+    nameservers             JSONB NOT NULL DEFAULT '[]',
+    dnssec_enabled          BOOLEAN NOT NULL DEFAULT false,
+
+    -- Asset: WHOIS & Contacts
+    whois_privacy           BOOLEAN NOT NULL DEFAULT false,
+    registrant_contact      JSONB,
+    admin_contact           JSONB,
+    tech_contact            JSONB,
+
+    -- Asset: Financial
+    annual_cost             DECIMAL(10,2),
+    currency                VARCHAR(3) DEFAULT 'USD',
+    purchase_price          DECIMAL(10,2),
+    fee_fixed               BOOLEAN NOT NULL DEFAULT false,
+
+    -- Asset: Metadata
+    purpose                 VARCHAR(255),
+    notes                   TEXT,
+    metadata                JSONB NOT NULL DEFAULT '{}',
+
+    -- Timestamps
     created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     deleted_at      TIMESTAMPTZ,
+
     CONSTRAINT uq_domains_fqdn UNIQUE (fqdn),
     CONSTRAINT chk_domains_lifecycle_state CHECK (
         lifecycle_state IN ('requested', 'approved', 'provisioned', 'active', 'disabled', 'retired')
+    ),
+    CONSTRAINT chk_domains_expiry_status CHECK (
+        expiry_status IS NULL OR expiry_status IN ('expiring_90d', 'expiring_30d', 'expiring_7d', 'expired', 'grace', 'redemption')
+    ),
+    CONSTRAINT chk_domains_transfer_status CHECK (
+        transfer_status IS NULL OR transfer_status IN ('pending', 'completed', 'failed', 'cancelled')
     )
 );
-CREATE INDEX idx_domains_project_state ON domains (project_id, lifecycle_state) WHERE deleted_at IS NULL;
-CREATE INDEX idx_domains_fqdn          ON domains (fqdn) WHERE deleted_at IS NULL;
+CREATE INDEX idx_domains_project_state       ON domains (project_id, lifecycle_state) WHERE deleted_at IS NULL;
+CREATE INDEX idx_domains_fqdn                ON domains (fqdn) WHERE deleted_at IS NULL;
+CREATE INDEX idx_domains_registrar_account   ON domains (registrar_account_id) WHERE deleted_at IS NULL;
+CREATE INDEX idx_domains_dns_provider        ON domains (dns_provider_id) WHERE deleted_at IS NULL;
+CREATE INDEX idx_domains_expiry_date         ON domains (expiry_date) WHERE deleted_at IS NULL AND expiry_date IS NOT NULL;
+CREATE INDEX idx_domains_tld                 ON domains (tld) WHERE deleted_at IS NULL;
 
 CREATE TABLE domain_variables (
     id         BIGSERIAL PRIMARY KEY,
@@ -559,6 +662,111 @@ CREATE TABLE audit_logs (
 CREATE INDEX idx_audit_logs_target ON audit_logs (target_kind, target_id, created_at DESC);
 CREATE INDEX idx_audit_logs_user   ON audit_logs (user_id, created_at DESC);
 CREATE INDEX idx_audit_logs_action ON audit_logs (action, created_at DESC);
+
+-- ============================================================
+-- SSL CERTIFICATES (Domain Asset Layer)                      [PA]
+-- ============================================================
+CREATE TABLE ssl_certificates (
+    id              BIGSERIAL PRIMARY KEY,
+    uuid            UUID NOT NULL DEFAULT gen_random_uuid(),
+    domain_id       BIGINT NOT NULL REFERENCES domains(id) ON DELETE CASCADE,
+    issuer          VARCHAR(256),
+    cert_type       VARCHAR(32),
+    serial_number   VARCHAR(128),
+    issued_at       TIMESTAMPTZ,
+    expires_at      TIMESTAMPTZ NOT NULL,
+    auto_renew      BOOLEAN NOT NULL DEFAULT false,
+    status          VARCHAR(32) NOT NULL DEFAULT 'active',
+    last_check_at   TIMESTAMPTZ,
+    notes           TEXT,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    deleted_at      TIMESTAMPTZ,
+    CONSTRAINT chk_ssl_status CHECK (
+        status IN ('active', 'expiring', 'expired', 'revoked', 'unknown')
+    )
+);
+CREATE INDEX idx_ssl_certs_domain  ON ssl_certificates (domain_id) WHERE deleted_at IS NULL;
+CREATE INDEX idx_ssl_certs_expires ON ssl_certificates (expires_at) WHERE deleted_at IS NULL;
+
+-- ============================================================
+-- DOMAIN FEE SCHEDULES & COST HISTORY (Domain Asset Layer)   [PA]
+-- ============================================================
+CREATE TABLE domain_fee_schedules (
+    id               BIGSERIAL PRIMARY KEY,
+    registrar_id     BIGINT NOT NULL REFERENCES registrars(id) ON DELETE CASCADE,
+    tld              VARCHAR(64) NOT NULL,
+    registration_fee DECIMAL(10,2) NOT NULL DEFAULT 0,
+    renewal_fee      DECIMAL(10,2) NOT NULL DEFAULT 0,
+    transfer_fee     DECIMAL(10,2) NOT NULL DEFAULT 0,
+    privacy_fee      DECIMAL(10,2) NOT NULL DEFAULT 0,
+    currency         VARCHAR(3) NOT NULL DEFAULT 'USD',
+    created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT uq_fee_schedule UNIQUE (registrar_id, tld)
+);
+
+CREATE TABLE domain_costs (
+    id              BIGSERIAL PRIMARY KEY,
+    domain_id       BIGINT NOT NULL REFERENCES domains(id) ON DELETE CASCADE,
+    cost_type       VARCHAR(32) NOT NULL,
+    amount          DECIMAL(10,2) NOT NULL,
+    currency        VARCHAR(3) NOT NULL DEFAULT 'USD',
+    period_start    DATE,
+    period_end      DATE,
+    paid_at         DATE,
+    notes           TEXT,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT chk_cost_type CHECK (
+        cost_type IN ('registration', 'renewal', 'transfer', 'restore', 'privacy', 'other')
+    )
+);
+CREATE INDEX idx_domain_costs_domain ON domain_costs (domain_id);
+
+-- ============================================================
+-- TAGS (Domain Asset Layer)                                  [PA]
+-- ============================================================
+CREATE TABLE tags (
+    id      BIGSERIAL PRIMARY KEY,
+    name    VARCHAR(64) NOT NULL,
+    color   VARCHAR(7),
+    CONSTRAINT uq_tags_name UNIQUE (name),
+    CONSTRAINT chk_tags_color CHECK (color IS NULL OR color ~ '^#[0-9a-fA-F]{6}$')
+);
+
+CREATE TABLE domain_tags (
+    domain_id   BIGINT NOT NULL REFERENCES domains(id) ON DELETE CASCADE,
+    tag_id      BIGINT NOT NULL REFERENCES tags(id) ON DELETE CASCADE,
+    PRIMARY KEY (domain_id, tag_id)
+);
+CREATE INDEX idx_domain_tags_tag ON domain_tags (tag_id);
+
+-- ============================================================
+-- DOMAIN IMPORT JOBS (Domain Asset Layer)                    [PA]
+-- ============================================================
+CREATE TABLE domain_import_jobs (
+    id                   BIGSERIAL PRIMARY KEY,
+    uuid                 UUID NOT NULL DEFAULT gen_random_uuid(),
+    registrar_account_id BIGINT REFERENCES registrar_accounts(id),
+    project_id           BIGINT NOT NULL REFERENCES projects(id),
+    source_type          VARCHAR(32) NOT NULL,
+    status               VARCHAR(32) NOT NULL DEFAULT 'pending',
+    total_count          INT NOT NULL DEFAULT 0,
+    imported_count       INT NOT NULL DEFAULT 0,
+    skipped_count        INT NOT NULL DEFAULT 0,
+    failed_count         INT NOT NULL DEFAULT 0,
+    error_details        JSONB,
+    created_by           BIGINT REFERENCES users(id),
+    started_at           TIMESTAMPTZ,
+    completed_at         TIMESTAMPTZ,
+    created_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT chk_import_source CHECK (
+        source_type IN ('csv_upload', 'api_sync', 'manual_bulk')
+    ),
+    CONSTRAINT chk_import_status CHECK (
+        status IN ('pending', 'fetching', 'processing', 'completed', 'failed')
+    )
+);
 
 -- ============================================================
 -- SEED DATA                                                  [P1]

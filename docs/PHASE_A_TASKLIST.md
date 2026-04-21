@@ -99,6 +99,8 @@ subsequent phases (DNS operations, monitoring, GFW detection).
 
 ### PA.1 — Schema + Models + Store Layer **(Opus)**
 
+**Status**: ✅ COMPLETED 2026-04-21
+
 **Owner**: **Opus** — schema design is the foundation; errors here are costly
 **Depends on**: Phase 1-2 complete
 **Reads first**: `docs/DOMAIN_ASSET_LAYER_DESIGN.md` §3 "Table Definitions",
@@ -181,6 +183,33 @@ schema and Go model layer.
 - Foreign key constraints work (e.g., can't insert domain with invalid registrar_account_id)
 - `go build ./...` succeeds
 - `go test ./store/postgres/...` passes
+
+**Delivered (2026-04-21)**:
+
+- `migrations/000001_init.up.sql` — added `registrars`, `registrar_accounts`,
+  `dns_providers`, `ssl_certificates`, `domain_fee_schedules`, `domain_costs`,
+  `tags`, `domain_tags`, `domain_import_jobs` tables; extended `domains` with
+  25+ asset columns (TLD, registrar binding, expiry, transfer tracking, DNS,
+  contacts, financial, metadata); added CHECK constraints + indexes
+- `migrations/000001_init.down.sql` — updated with reverse drops
+- `store/postgres/domain.go` — `Domain` struct extended with all new fields;
+  `domainColumns` constant for DRY queries; added `UpdateAssetFields()`,
+  `UpdateExpiryStatus()`, `UpdateTransferStatus()`, `ListExpiring()`
+- `store/postgres/registrar.go` — `Registrar`, `RegistrarAccount` structs;
+  `RegistrarStore` with full CRUD + dependency checks on delete
+- `store/postgres/dns_provider.go` — `DNSProvider` struct; `DNSProviderStore`
+  with CRUD + dependency checks
+- `store/postgres/ssl_certificate.go` — `SSLCertificate` struct;
+  `SSLCertificateStore` with CRUD + `Upsert()` + `ListExpiring()`
+- `store/postgres/cost.go` — `DomainFeeSchedule`, `DomainCost` structs;
+  `CostStore` with fee schedule CRUD + cost CRUD + summary queries
+- `store/postgres/tag.go` — `Tag` struct; `TagStore` with CRUD +
+  `SetDomainTags()` + `GetDomainTags()` + `ListWithCounts()`
+- `internal/lifecycle/service.go` — updated `RegisterInput` (removed old
+  `DNSProvider`/`DNSZone`, added `DNSProviderID`)
+- `api/handler/domain.go` — updated request/response for new domain fields
+- `docs/DATABASE_SCHEMA.md` — added Phase A table index
+- `go build ./...` passes; `go vet` passes on all changed packages
 
 ---
 

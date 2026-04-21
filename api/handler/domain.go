@@ -24,10 +24,9 @@ func NewDomainHandler(svc *lifecycle.Service, logger *zap.Logger) *DomainHandler
 }
 
 type RegisterDomainRequest struct {
-	ProjectID   int64   `json:"project_id" binding:"required"`
-	FQDN        string  `json:"fqdn" binding:"required"`
-	DNSProvider *string `json:"dns_provider"`
-	DNSZone     *string `json:"dns_zone"`
+	ProjectID     int64  `json:"project_id" binding:"required"`
+	FQDN          string `json:"fqdn" binding:"required"`
+	DNSProviderID *int64 `json:"dns_provider_id"`
 }
 
 // Register handles POST /api/v1/domains — creates a domain in "requested" state.
@@ -42,12 +41,11 @@ func (h *DomainHandler) Register(c *gin.Context) {
 
 	userID := middleware.GetUserID(c)
 	d, err := h.svc.Register(c.Request.Context(), lifecycle.RegisterInput{
-		ProjectID:   req.ProjectID,
-		FQDN:        req.FQDN,
-		OwnerUserID: &userID,
-		DNSProvider: req.DNSProvider,
-		DNSZone:     req.DNSZone,
-		TriggeredBy: fmt.Sprintf("user:%d", userID),
+		ProjectID:     req.ProjectID,
+		FQDN:          req.FQDN,
+		OwnerUserID:   &userID,
+		DNSProviderID: req.DNSProviderID,
+		TriggeredBy:   fmt.Sprintf("user:%d", userID),
 	})
 	if errors.Is(err, lifecycle.ErrDuplicateFQDN) {
 		c.JSON(http.StatusConflict, gin.H{
@@ -237,15 +235,20 @@ func (h *DomainHandler) History(c *gin.Context) {
 
 func domainResponse(d *postgres.Domain) gin.H {
 	return gin.H{
-		"id":              d.ID,
-		"uuid":            d.UUID,
-		"project_id":      d.ProjectID,
-		"fqdn":            d.FQDN,
-		"lifecycle_state": d.LifecycleState,
-		"owner_user_id":   d.OwnerUserID,
-		"dns_provider":    d.DNSProvider,
-		"dns_zone":        d.DNSZone,
-		"created_at":      d.CreatedAt,
-		"updated_at":      d.UpdatedAt,
+		"id":                   d.ID,
+		"uuid":                 d.UUID,
+		"project_id":           d.ProjectID,
+		"fqdn":                 d.FQDN,
+		"lifecycle_state":      d.LifecycleState,
+		"owner_user_id":        d.OwnerUserID,
+		"tld":                  d.TLD,
+		"registrar_account_id": d.RegistrarAccountID,
+		"dns_provider_id":      d.DNSProviderID,
+		"expiry_date":          d.ExpiryDate,
+		"auto_renew":           d.AutoRenew,
+		"annual_cost":          d.AnnualCost,
+		"currency":             d.Currency,
+		"created_at":           d.CreatedAt,
+		"updated_at":           d.UpdatedAt,
 	}
 }

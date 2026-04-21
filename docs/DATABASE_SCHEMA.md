@@ -35,8 +35,26 @@ Each table is tagged with the phase it must exist by:
 |---|---|
 | **P1** | Required for Phase 1 (initial control plane skeleton) |
 | **P2** | Required for Phase 2 (sharding, rollback, dry-run, agent management UI) |
+| **PA** | Required for Phase A (domain asset layer restructuring) |
 | **P3** | Required for Phase 3 (canary, probe, alert, agent upgrade) |
 | **P4** | Required for Phase 4 (lifecycle approval, nginx artifact, HA) |
+
+### Phase A Tables (Domain Asset Layer, added 2026-04-21)
+
+| Table | Purpose |
+|---|---|
+| `registrars` | Registrar vendors (Namecheap, GoDaddy, Gandi) |
+| `registrar_accounts` | Credential accounts at registrars (many per registrar) |
+| `dns_providers` | DNS hosting providers (Cloudflare, Route53) |
+| `ssl_certificates` | SSL cert tracking per domain (issuer, expiry, status) |
+| `domain_fee_schedules` | Cost schedule per (registrar × TLD) |
+| `domain_costs` | Per-domain cost history (registration, renewal, transfer events) |
+| `tags` + `domain_tags` | Flexible many-to-many tagging system |
+| `domain_import_jobs` | Bulk import tracking (CSV upload, API sync) |
+
+The `domains` table was extended with 25+ asset columns (registration dates,
+provider bindings, transfer tracking, financial, contacts, metadata).
+See `migrations/000001_init.up.sql` for the full schema.
 
 Tables tagged P2-P4 may exist in `000001_init.up.sql` from day one (it is
 cheaper to create empty tables than to add tables later, especially during

@@ -77,21 +77,19 @@ func (s *Service) Transition(ctx context.Context, domainID int64, from, to, reas
 // This is the documented exception to the Transition() rule: there is no
 // nil → requested edge. The domain_lifecycle_history row is inserted manually.
 type RegisterInput struct {
-	ProjectID   int64
-	FQDN        string
-	OwnerUserID *int64
-	DNSProvider *string
-	DNSZone     *string
-	TriggeredBy string
+	ProjectID     int64
+	FQDN          string
+	OwnerUserID   *int64
+	DNSProviderID *int64
+	TriggeredBy   string
 }
 
 func (s *Service) Register(ctx context.Context, in RegisterInput) (*postgres.Domain, error) {
 	d := &postgres.Domain{
-		ProjectID:   in.ProjectID,
-		FQDN:        in.FQDN,
-		OwnerUserID: in.OwnerUserID,
-		DNSProvider: in.DNSProvider,
-		DNSZone:     in.DNSZone,
+		ProjectID:     in.ProjectID,
+		FQDN:          in.FQDN,
+		OwnerUserID:   in.OwnerUserID,
+		DNSProviderID: in.DNSProviderID,
 	}
 
 	created, err := s.domains.Create(ctx, d)

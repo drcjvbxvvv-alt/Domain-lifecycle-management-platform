@@ -19,11 +19,56 @@ type Domain struct {
 	FQDN           string     `db:"fqdn"`
 	LifecycleState string     `db:"lifecycle_state"`
 	OwnerUserID    *int64     `db:"owner_user_id"`
-	DNSProvider    *string    `db:"dns_provider"`
-	DNSZone        *string    `db:"dns_zone"`
-	CreatedAt      time.Time  `db:"created_at"`
-	UpdatedAt      time.Time  `db:"updated_at"`
-	DeletedAt      *time.Time `db:"deleted_at"`
+
+	// Asset: Registration & Provider binding
+	TLD                  *string `db:"tld"`
+	RegistrarAccountID   *int64  `db:"registrar_account_id"`
+	DNSProviderID        *int64  `db:"dns_provider_id"`
+
+	// Asset: Dates & Expiry
+	RegistrationDate *time.Time `db:"registration_date"`
+	ExpiryDate       *time.Time `db:"expiry_date"`
+	AutoRenew        bool       `db:"auto_renew"`
+	GraceEndDate     *time.Time `db:"grace_end_date"`
+	ExpiryStatus     *string    `db:"expiry_status"`
+
+	// Asset: Status flags
+	TransferLock bool `db:"transfer_lock"`
+	Hold         bool `db:"hold"`
+
+	// Asset: Transfer tracking
+	TransferStatus           *string    `db:"transfer_status"`
+	TransferGainingRegistrar *string    `db:"transfer_gaining_registrar"`
+	TransferRequestedAt      *time.Time `db:"transfer_requested_at"`
+	TransferCompletedAt      *time.Time `db:"transfer_completed_at"`
+	LastTransferAt           *time.Time `db:"last_transfer_at"`
+	LastRenewedAt            *time.Time `db:"last_renewed_at"`
+
+	// Asset: DNS infrastructure
+	Nameservers    json.RawMessage `db:"nameservers"`
+	DNSSECEnabled  bool            `db:"dnssec_enabled"`
+
+	// Asset: WHOIS & Contacts
+	WhoisPrivacy       bool            `db:"whois_privacy"`
+	RegistrantContact  json.RawMessage `db:"registrant_contact"`
+	AdminContact       json.RawMessage `db:"admin_contact"`
+	TechContact        json.RawMessage `db:"tech_contact"`
+
+	// Asset: Financial
+	AnnualCost    *float64 `db:"annual_cost"`
+	Currency      *string  `db:"currency"`
+	PurchasePrice *float64 `db:"purchase_price"`
+	FeeFixed      bool     `db:"fee_fixed"`
+
+	// Asset: Metadata
+	Purpose  *string         `db:"purpose"`
+	Notes    *string         `db:"notes"`
+	Metadata json.RawMessage `db:"metadata"`
+
+	// Timestamps
+	CreatedAt time.Time  `db:"created_at"`
+	UpdatedAt time.Time  `db:"updated_at"`
+	DeletedAt *time.Time `db:"deleted_at"`
 }
 
 var ErrDomainNotFound = errors.New("domain not found")
@@ -36,16 +81,48 @@ func NewDomainStore(db *sqlx.DB) *DomainStore {
 	return &DomainStore{db: db}
 }
 
+const domainColumns = `id, uuid, project_id, fqdn, lifecycle_state, owner_user_id,
+	tld, registrar_account_id, dns_provider_id,
+	registration_date, expiry_date, auto_renew, grace_end_date, expiry_status,
+	transfer_lock, hold,
+	transfer_status, transfer_gaining_registrar, transfer_requested_at, transfer_completed_at, last_transfer_at, last_renewed_at,
+	nameservers, dnssec_enabled,
+	whois_privacy, registrant_contact, admin_contact, tech_contact,
+	annual_cost, currency, purchase_price, fee_fixed,
+	purpose, notes, metadata,
+	created_at, updated_at, deleted_at`
+
 // Create inserts a new domain in the initial "requested" state.
 // This is the documented exception to the Transition() rule: there is no
 // nil → requested edge, so the INSERT sets lifecycle_state directly.
 func (s *DomainStore) Create(ctx context.Context, d *Domain) (*Domain, error) {
 	var out Domain
 	err := s.db.QueryRowxContext(ctx,
-		`INSERT INTO domains (project_id, fqdn, lifecycle_state, owner_user_id, dns_provider, dns_zone)
-		 VALUES ($1, $2, 'requested', $3, $4, $5)
-		 RETURNING id, uuid, project_id, fqdn, lifecycle_state, owner_user_id, dns_provider, dns_zone, created_at, updated_at, deleted_at`,
-		d.ProjectID, d.FQDN, d.OwnerUserID, d.DNSProvider, d.DNSZone).StructScan(&out)
+		`INSERT INTO domains (
+			project_id, fqdn, lifecycle_state, owner_user_id,
+			tld, registrar_account_id, dns_provider_id,
+			registration_date, expiry_date, auto_renew, grace_end_date,
+			transfer_lock, hold, nameservers, dnssec_enabled,
+			whois_privacy, registrant_contact, admin_contact, tech_contact,
+			annual_cost, currency, purchase_price, fee_fixed,
+			purpose, notes, metadata
+		) VALUES (
+			$1, $2, 'requested', $3,
+			$4, $5, $6,
+			$7, $8, $9, $10,
+			$11, $12, $13, $14,
+			$15, $16, $17, $18,
+			$19, $20, $21, $22,
+			$23, $24, $25
+		) RETURNING `+domainColumns,
+		d.ProjectID, d.FQDN, d.OwnerUserID,
+		d.TLD, d.RegistrarAccountID, d.DNSProviderID,
+		d.RegistrationDate, d.ExpiryDate, d.AutoRenew, d.GraceEndDate,
+		d.TransferLock, d.Hold, d.Nameservers, d.DNSSECEnabled,
+		d.WhoisPrivacy, d.RegistrantContact, d.AdminContact, d.TechContact,
+		d.AnnualCost, d.Currency, d.PurchasePrice, d.FeeFixed,
+		d.Purpose, d.Notes, d.Metadata,
+	).StructScan(&out)
 	if err != nil {
 		return nil, fmt.Errorf("create domain: %w", err)
 	}
@@ -55,8 +132,7 @@ func (s *DomainStore) Create(ctx context.Context, d *Domain) (*Domain, error) {
 func (s *DomainStore) GetByID(ctx context.Context, id int64) (*Domain, error) {
 	var d Domain
 	err := s.db.GetContext(ctx, &d,
-		`SELECT id, uuid, project_id, fqdn, lifecycle_state, owner_user_id, dns_provider, dns_zone, created_at, updated_at, deleted_at
-		 FROM domains WHERE id = $1 AND deleted_at IS NULL`, id)
+		`SELECT `+domainColumns+` FROM domains WHERE id = $1 AND deleted_at IS NULL`, id)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrDomainNotFound
 	}
@@ -76,7 +152,7 @@ func (s *DomainStore) ListByProject(ctx context.Context, projectID int64, cursor
 	}
 	var domains []Domain
 	err := s.db.SelectContext(ctx, &domains,
-		`SELECT id, uuid, project_id, fqdn, lifecycle_state, owner_user_id, dns_provider, dns_zone, created_at, updated_at, deleted_at
+		`SELECT `+domainColumns+`
 		 FROM domains
 		 WHERE project_id = $1 AND deleted_at IS NULL AND id > $2
 		 ORDER BY id ASC
@@ -121,12 +197,84 @@ func (s *DomainStore) GetVariables(ctx context.Context, domainID int64) (map[str
 func (s *DomainStore) ListActiveByProject(ctx context.Context, projectID int64) ([]Domain, error) {
 	var domains []Domain
 	err := s.db.SelectContext(ctx, &domains,
-		`SELECT id, uuid, project_id, fqdn, lifecycle_state, owner_user_id, dns_provider, dns_zone, created_at, updated_at, deleted_at
+		`SELECT `+domainColumns+`
 		 FROM domains
 		 WHERE project_id = $1 AND lifecycle_state = 'active' AND deleted_at IS NULL
 		 ORDER BY fqdn ASC`, projectID)
 	if err != nil {
 		return nil, fmt.Errorf("list active domains by project: %w", err)
+	}
+	return domains, nil
+}
+
+// UpdateAssetFields updates the domain's asset-related columns.
+// Does NOT touch lifecycle_state (that goes through LifecycleStore.TransitionTx).
+func (s *DomainStore) UpdateAssetFields(ctx context.Context, d *Domain) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE domains SET
+			tld = $2, registrar_account_id = $3, dns_provider_id = $4,
+			registration_date = $5, expiry_date = $6, auto_renew = $7, grace_end_date = $8,
+			transfer_lock = $9, hold = $10,
+			nameservers = $11, dnssec_enabled = $12,
+			whois_privacy = $13, registrant_contact = $14, admin_contact = $15, tech_contact = $16,
+			annual_cost = $17, currency = $18, purchase_price = $19, fee_fixed = $20,
+			purpose = $21, notes = $22, metadata = $23,
+			updated_at = NOW()
+		WHERE id = $1 AND deleted_at IS NULL`,
+		d.ID,
+		d.TLD, d.RegistrarAccountID, d.DNSProviderID,
+		d.RegistrationDate, d.ExpiryDate, d.AutoRenew, d.GraceEndDate,
+		d.TransferLock, d.Hold,
+		d.Nameservers, d.DNSSECEnabled,
+		d.WhoisPrivacy, d.RegistrantContact, d.AdminContact, d.TechContact,
+		d.AnnualCost, d.Currency, d.PurchasePrice, d.FeeFixed,
+		d.Purpose, d.Notes, d.Metadata,
+	)
+	if err != nil {
+		return fmt.Errorf("update domain asset fields: %w", err)
+	}
+	return nil
+}
+
+// UpdateExpiryStatus sets the computed expiry_status field.
+func (s *DomainStore) UpdateExpiryStatus(ctx context.Context, domainID int64, status *string) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE domains SET expiry_status = $2, updated_at = NOW() WHERE id = $1 AND deleted_at IS NULL`,
+		domainID, status)
+	if err != nil {
+		return fmt.Errorf("update expiry status: %w", err)
+	}
+	return nil
+}
+
+// UpdateTransferStatus updates transfer tracking fields.
+func (s *DomainStore) UpdateTransferStatus(ctx context.Context, domainID int64, status *string, gainingRegistrar *string, requestedAt, completedAt *time.Time) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE domains SET
+			transfer_status = $2, transfer_gaining_registrar = $3,
+			transfer_requested_at = $4, transfer_completed_at = $5,
+			updated_at = NOW()
+		WHERE id = $1 AND deleted_at IS NULL`,
+		domainID, status, gainingRegistrar, requestedAt, completedAt)
+	if err != nil {
+		return fmt.Errorf("update transfer status: %w", err)
+	}
+	return nil
+}
+
+// ListExpiring returns domains expiring within the given number of days.
+func (s *DomainStore) ListExpiring(ctx context.Context, days int) ([]Domain, error) {
+	var domains []Domain
+	err := s.db.SelectContext(ctx, &domains,
+		`SELECT `+domainColumns+`
+		 FROM domains
+		 WHERE deleted_at IS NULL
+		   AND expiry_date IS NOT NULL
+		   AND expiry_date <= CURRENT_DATE + $1 * INTERVAL '1 day'
+		   AND lifecycle_state NOT IN ('retired')
+		 ORDER BY expiry_date ASC`, days)
+	if err != nil {
+		return nil, fmt.Errorf("list expiring domains: %w", err)
 	}
 	return domains, nil
 }
