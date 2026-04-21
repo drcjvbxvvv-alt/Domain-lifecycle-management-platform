@@ -10,15 +10,17 @@ import (
 
 // Deps bundles all dependencies needed to register routes.
 type Deps struct {
-	AuthHandler      *handler.AuthHandler
-	ProjectHandler   *handler.ProjectHandler
-	DomainHandler    *handler.DomainHandler
-	TemplateHandler  *handler.TemplateHandler
-	ArtifactHandler  *handler.ArtifactHandler
-	ReleaseHandler   *handler.ReleaseHandler
-	AgentHandler     *handler.AgentHandler
-	HostGroupHandler *handler.HostGroupHandler
-	JWTManager       *auth.JWTManager
+	AuthHandler        *handler.AuthHandler
+	ProjectHandler     *handler.ProjectHandler
+	DomainHandler      *handler.DomainHandler
+	TemplateHandler    *handler.TemplateHandler
+	ArtifactHandler    *handler.ArtifactHandler
+	ReleaseHandler     *handler.ReleaseHandler
+	AgentHandler       *handler.AgentHandler
+	HostGroupHandler   *handler.HostGroupHandler
+	RegistrarHandler   *handler.RegistrarHandler
+	DNSProviderHandler *handler.DNSProviderHandler
+	JWTManager         *auth.JWTManager
 }
 
 // RegisterV1 mounts all /api/v1 routes onto the Gin engine.
@@ -114,6 +116,38 @@ func RegisterV1(r *gin.Engine, deps Deps) {
 			hostGroups.GET("", middleware.RequireAnyRole("viewer", "operator", "release_manager", "admin", "auditor"), deps.HostGroupHandler.List)
 			hostGroups.GET("/:id", middleware.RequireAnyRole("viewer", "operator", "release_manager", "admin", "auditor"), deps.HostGroupHandler.Get)
 			hostGroups.PUT("/:id", middleware.RequireAnyRole("admin"), deps.HostGroupHandler.UpdateConcurrency)
+		}
+
+		// ── Registrars ────────────────────────────────────────────────
+		registrars := authed.Group("/registrars")
+		{
+			registrars.POST("", middleware.RequireAnyRole("admin"), deps.RegistrarHandler.Create)
+			registrars.GET("", middleware.RequireAnyRole("viewer", "operator", "release_manager", "admin", "auditor"), deps.RegistrarHandler.List)
+			registrars.GET("/:id", middleware.RequireAnyRole("viewer", "operator", "release_manager", "admin", "auditor"), deps.RegistrarHandler.Get)
+			registrars.PUT("/:id", middleware.RequireAnyRole("admin"), deps.RegistrarHandler.Update)
+			registrars.DELETE("/:id", middleware.RequireAnyRole("admin"), deps.RegistrarHandler.Delete)
+			// Registrar accounts (nested)
+			registrars.POST("/:id/accounts", middleware.RequireAnyRole("admin"), deps.RegistrarHandler.CreateAccount)
+			registrars.GET("/:id/accounts", middleware.RequireAnyRole("viewer", "operator", "release_manager", "admin", "auditor"), deps.RegistrarHandler.ListAccounts)
+		}
+
+		// ── Registrar Accounts (individual) ───────────────────────────
+		registrarAccounts := authed.Group("/registrar-accounts")
+		{
+			registrarAccounts.GET("/:id", middleware.RequireAnyRole("viewer", "operator", "release_manager", "admin", "auditor"), deps.RegistrarHandler.GetAccount)
+			registrarAccounts.PUT("/:id", middleware.RequireAnyRole("admin"), deps.RegistrarHandler.UpdateAccount)
+			registrarAccounts.DELETE("/:id", middleware.RequireAnyRole("admin"), deps.RegistrarHandler.DeleteAccount)
+		}
+
+		// ── DNS Providers ─────────────────────────────────────────────
+		dnsProviders := authed.Group("/dns-providers")
+		{
+			dnsProviders.GET("/types", middleware.RequireAnyRole("viewer", "operator", "release_manager", "admin", "auditor"), deps.DNSProviderHandler.SupportedTypes)
+			dnsProviders.POST("", middleware.RequireAnyRole("admin"), deps.DNSProviderHandler.Create)
+			dnsProviders.GET("", middleware.RequireAnyRole("viewer", "operator", "release_manager", "admin", "auditor"), deps.DNSProviderHandler.List)
+			dnsProviders.GET("/:id", middleware.RequireAnyRole("viewer", "operator", "release_manager", "admin", "auditor"), deps.DNSProviderHandler.Get)
+			dnsProviders.PUT("/:id", middleware.RequireAnyRole("admin"), deps.DNSProviderHandler.Update)
+			dnsProviders.DELETE("/:id", middleware.RequireAnyRole("admin"), deps.DNSProviderHandler.Delete)
 		}
 	}
 }

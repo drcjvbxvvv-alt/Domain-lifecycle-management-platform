@@ -20,8 +20,10 @@ import (
 	agentsvc "domain-platform/internal/agent"
 	"domain-platform/internal/auth"
 	"domain-platform/internal/bootstrap"
+	"domain-platform/internal/dnsprovider"
 	"domain-platform/internal/lifecycle"
 	"domain-platform/internal/project"
+	"domain-platform/internal/registrar"
 	"domain-platform/internal/release"
 	tmplsvc "domain-platform/internal/template"
 	pkgstorage "domain-platform/pkg/storage"
@@ -98,17 +100,27 @@ func main() {
 	agentProtocolHandler := handler.NewAgentProtocolHandler(agentSvc, logger)
 	agentHandler := handler.NewAgentHandler(agentSvc, logger)
 
+	registrarStore := postgres.NewRegistrarStore(db)
+	registrarSvc := registrar.NewService(registrarStore, logger)
+	registrarHandler := handler.NewRegistrarHandler(registrarSvc, logger)
+
+	dnsProviderStore := postgres.NewDNSProviderStore(db)
+	dnsProviderSvc := dnsprovider.NewService(dnsProviderStore, logger)
+	dnsProviderHandler := handler.NewDNSProviderHandler(dnsProviderSvc, logger)
+
 	// ── Management API listener (:8080, JWT auth) ──────────────────────────
 	mgmtRouter := buildManagementRouter(logger, router.Deps{
-		AuthHandler:      authHandler,
-		ProjectHandler:   projectHandler,
-		DomainHandler:    domainHandler,
-		TemplateHandler:  templateHandler,
-		ArtifactHandler:  artifactHandler,
-		ReleaseHandler:   releaseHandler,
-		AgentHandler:     agentHandler,
-		HostGroupHandler: hostGroupHandler,
-		JWTManager:       jwtMgr,
+		AuthHandler:        authHandler,
+		ProjectHandler:     projectHandler,
+		DomainHandler:      domainHandler,
+		TemplateHandler:    templateHandler,
+		ArtifactHandler:    artifactHandler,
+		ReleaseHandler:     releaseHandler,
+		AgentHandler:       agentHandler,
+		HostGroupHandler:   hostGroupHandler,
+		RegistrarHandler:   registrarHandler,
+		DNSProviderHandler: dnsProviderHandler,
+		JWTManager:         jwtMgr,
 	})
 	mgmtAddr := fmt.Sprintf("%s:%d", cfg.Server.Host, cfg.Server.Port)
 	mgmtServer := &http.Server{

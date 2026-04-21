@@ -124,6 +124,34 @@ const router = createRouter({
           meta: { title: 'Host Group 管理', minRole: 'viewer' },
         },
 
+        // ── Registrars ────────────────────────────────────────
+        {
+          path: 'registrars',
+          name: 'RegistrarList',
+          component: () => import('@/views/registrars/RegistrarList.vue'),
+          meta: { title: 'Registrar 管理', minRole: 'viewer' },
+        },
+        {
+          path: 'registrars/:id',
+          name: 'RegistrarDetail',
+          component: () => import('@/views/registrars/RegistrarDetail.vue'),
+          meta: { title: 'Registrar 詳情', minRole: 'viewer' },
+        },
+
+        // ── DNS Providers ─────────────────────────────────────
+        {
+          path: 'dns-providers',
+          name: 'DNSProviderList',
+          component: () => import('@/views/dns-providers/DNSProviderList.vue'),
+          meta: { title: 'DNS Provider 管理', minRole: 'viewer' },
+        },
+        {
+          path: 'dns-providers/:id',
+          name: 'DNSProviderDetail',
+          component: () => import('@/views/dns-providers/DNSProviderDetail.vue'),
+          meta: { title: 'DNS Provider 詳情', minRole: 'viewer' },
+        },
+
         // ── Settings ──────────────────────────────────────────
         {
           path: 'settings/users',

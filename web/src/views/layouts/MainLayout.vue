@@ -40,6 +40,13 @@ const navGroups: NavGroup[] = [
     ],
   },
   {
+    groupLabel: '資產管理',
+    items: [
+      { label: 'Registrar 管理',    key: '/registrars',    icon: 'briefcase' },
+      { label: 'DNS Provider 管理', key: '/dns-providers', icon: 'dns'       },
+    ],
+  },
+  {
     groupLabel: '設定',
     items: [
       { label: '使用者管理', key: '/settings/users', icon: 'users' },

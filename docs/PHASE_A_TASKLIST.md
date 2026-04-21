@@ -215,6 +215,8 @@ schema and Go model layer.
 
 ### PA.2 — Registrar + DNS Provider CRUD (API + UI)
 
+**Status**: ✅ COMPLETED 2026-04-21
+
 **Owner**: Sonnet
 **Depends on**: PA.1 (tables and store layer must exist)
 **Reads first**: `docs/DOMAIN_ASSET_LAYER_DESIGN.md` §6 "API Endpoints",
@@ -299,6 +301,51 @@ to. They must be manageable before domains can be assigned to them.
 - List endpoints support pagination (`?page=1&per_page=20`)
 - Frontend forms validate required fields
 - `npm run build` succeeds with zero TypeScript errors
+
+**Delivered (2026-04-21)**:
+
+- `internal/registrar/service.go` — `Service` wrapping `RegistrarStore`:
+  `Create`, `GetByID`, `List`, `Update`, `Delete`, `CreateAccount`,
+  `GetAccount`, `ListAccounts`, `UpdateAccount`, `DeleteAccount`;
+  validates name non-empty; defaults capabilities/credentials to `{}`;
+  maps store sentinel errors to package-level sentinels
+- `internal/registrar/service_test.go` — 4 unit tests (name validation,
+  capability default, error sentinel distinctness)
+- `internal/dnsprovider/service.go` — `Service` wrapping `DNSProviderStore`:
+  full CRUD + `SupportedTypes()` helper; validates `provider_type` against
+  `KnownProviderTypes` map (cloudflare, route53, dnspod, alidns, godaddy,
+  namecheap, manual)
+- `internal/dnsprovider/service_test.go` — 7 unit tests (known/unknown types,
+  name validation, config default, sentinel distinctness, SupportedTypes)
+- `api/handler/registrar.go` — handlers for all registrar + account endpoints;
+  credentials intentionally excluded from responses (security)
+- `api/handler/dnsprovider.go` — handlers for all DNS provider endpoints;
+  `SupportedTypes` endpoint returns dropdown values for frontend
+- `api/router/router.go` — registered `/registrars`, `/registrar-accounts`,
+  `/dns-providers` route groups with RBAC (admin for write, viewer+ for read)
+- `cmd/server/main.go` — wired `RegistrarStore → Service → Handler` and
+  `DNSProviderStore → Service → Handler`
+- `web/src/types/registrar.ts` — `RegistrarResponse`, `RegistrarAccountResponse`,
+  create/update request types
+- `web/src/types/dnsprovider.ts` — `DNSProviderResponse`, `DNSProviderType`
+  union, create/update request types
+- `web/src/api/registrar.ts` — full API client for registrars + accounts
+- `web/src/api/dnsprovider.ts` — API client for DNS providers
+- `web/src/stores/registrar.ts` — Pinia store with all CRUD actions
+- `web/src/stores/dnsprovider.ts` — Pinia store with all CRUD actions +
+  `fetchTypes()` for dropdown
+- `web/src/views/registrars/RegistrarList.vue` — list table + create modal
+- `web/src/views/registrars/RegistrarDetail.vue` — detail + edit modal +
+  accounts table + create account modal
+- `web/src/views/dns-providers/DNSProviderList.vue` — list + create modal with
+  dynamic type dropdown
+- `web/src/views/dns-providers/DNSProviderDetail.vue` — detail + edit modal
+- `web/src/router/index.ts` — 4 new routes added (RegistrarList, RegistrarDetail,
+  DNSProviderList, DNSProviderDetail)
+- `web/src/views/layouts/MainLayout.vue` — "資產管理" nav group added with
+  Registrar + DNS Provider sidebar entries
+- `go build ./...` passes; `go test ./internal/registrar/... ./internal/dnsprovider/...`
+  all 11 tests pass; `npm run build` zero TypeScript errors
 
 ---
 
