@@ -190,6 +190,12 @@ const router = createRouter({
           component: () => import('@/views/settings/TagList.vue'),
           meta: { title: '標籤管理', minRole: 'admin' },
         },
+        {
+          path: 'settings/dns-templates',
+          name: 'DNSTemplateList',
+          component: () => import('@/views/settings/DNSTemplateList.vue'),
+          meta: { title: 'DNS 記錄範本', minRole: 'viewer' },
+        },
       ],
     },
 

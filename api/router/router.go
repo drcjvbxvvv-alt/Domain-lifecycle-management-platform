@@ -29,6 +29,7 @@ type Deps struct {
 	DNSRecordHandler         *handler.DNSRecordHandler
 	DomainPermissionHandler  *handler.DomainPermissionHandler
 	PermissionChecker        middleware.DNSPermissionChecker
+	DNSTemplateHandler       *handler.DNSTemplateHandler
 	JWTManager               *auth.JWTManager
 }
 
@@ -200,6 +201,18 @@ func RegisterV1(r *gin.Engine, deps Deps) {
 		domains.POST("/:id/ssl-certs", middleware.RequireAnyRole("operator", "release_manager", "admin"), deps.SSLHandler.Create)
 		domains.GET("/:id/ssl-certs", middleware.RequireAnyRole("viewer", "operator", "release_manager", "admin", "auditor"), deps.SSLHandler.List)
 		domains.POST("/:id/ssl-certs/check", middleware.RequireAnyRole("operator", "release_manager", "admin"), deps.SSLHandler.Check)
+
+		// ── DNS Record Templates ───────────────────────────────────────
+		dnsTemplates := authed.Group("/dns-templates")
+		{
+			dnsTemplates.GET("", middleware.RequireAnyRole("viewer", "operator", "release_manager", "admin", "auditor"), deps.DNSTemplateHandler.List)
+			dnsTemplates.POST("", middleware.RequireAnyRole("operator", "release_manager", "admin"), deps.DNSTemplateHandler.Create)
+			dnsTemplates.GET("/:id", middleware.RequireAnyRole("viewer", "operator", "release_manager", "admin", "auditor"), deps.DNSTemplateHandler.Get)
+			dnsTemplates.PUT("/:id", middleware.RequireAnyRole("operator", "release_manager", "admin"), deps.DNSTemplateHandler.Update)
+			dnsTemplates.DELETE("/:id", middleware.RequireAnyRole("admin"), deps.DNSTemplateHandler.Delete)
+		}
+		// Apply template (nested under domains)
+		domains.POST("/:id/dns/apply-template", middleware.RequireDNSPermission(deps.PermissionChecker, "editor"), deps.DNSTemplateHandler.ApplyTemplate)
 
 		// ── Tags ───────────────────────────────────────────────────────
 		tags := authed.Group("/tags")

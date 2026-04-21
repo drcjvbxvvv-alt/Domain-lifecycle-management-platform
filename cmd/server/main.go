@@ -22,6 +22,7 @@ import (
 	"domain-platform/internal/bootstrap"
 	costsvc "domain-platform/internal/cost"
 	domainsvc "domain-platform/internal/domain"
+	dnstemplateSvc "domain-platform/internal/dnstemplate"
 	"domain-platform/internal/dnsprovider"
 	"domain-platform/internal/dnsquery"
 	dnsrecsvc "domain-platform/internal/dnsrecord"
@@ -144,6 +145,10 @@ func main() {
 	permSvc := domainsvc.NewPermissionService(domainPermStore, roleStore, logger)
 	domainPermHandler := handler.NewDomainPermissionHandler(permSvc, logger)
 
+	dnsTemplateStore := postgres.NewDNSTemplateStore(db)
+	dnsTemplateSvc := dnstemplateSvc.NewService(dnsTemplateStore, logger)
+	dnsTemplateHandler := handler.NewDNSTemplateHandler(dnsTemplateSvc, logger)
+
 	// ── Management API listener (:8080, JWT auth) ──────────────────────────
 	mgmtRouter := buildManagementRouter(logger, router.Deps{
 		AuthHandler:        authHandler,
@@ -165,6 +170,7 @@ func main() {
 		DNSRecordHandler:        dnsRecordHandler,
 		DomainPermissionHandler: domainPermHandler,
 		PermissionChecker:       permSvc,
+		DNSTemplateHandler:      dnsTemplateHandler,
 		JWTManager:              jwtMgr,
 	})
 	mgmtAddr := fmt.Sprintf("%s:%d", cfg.Server.Host, cfg.Server.Port)

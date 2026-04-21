@@ -791,6 +791,29 @@ CREATE INDEX idx_domain_permissions_domain ON domain_permissions (domain_id);
 CREATE INDEX idx_domain_permissions_user   ON domain_permissions (user_id);
 
 -- ============================================================
+-- DNS RECORD TEMPLATES                                       [PB.7]
+-- ============================================================
+-- Reusable record blueprints with {{variable}} placeholders.
+-- Applying a template = rendering + staging records for plan/apply.
+CREATE TABLE dns_record_templates (
+    id          BIGSERIAL PRIMARY KEY,
+    uuid        UUID NOT NULL DEFAULT gen_random_uuid(),
+    name        VARCHAR(128) NOT NULL,
+    description TEXT,
+    -- records: [{name:"@",type:"A",content:"{{ip}}",ttl:300,priority:0}, ...]
+    records     JSONB NOT NULL DEFAULT '[]',
+    -- variables: {"ip": "", "mx_host": ""} — keys are variable names, values are default/description
+    variables   JSONB NOT NULL DEFAULT '{}',
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT uq_dns_record_templates_name UNIQUE (name)
+);
+
+-- Extend domains with drift/sync tracking columns
+ALTER TABLE domains ADD COLUMN IF NOT EXISTS last_sync_at  TIMESTAMPTZ;
+ALTER TABLE domains ADD COLUMN IF NOT EXISTS last_drift_at TIMESTAMPTZ;
+
+-- ============================================================
 -- SEED DATA                                                  [P1]
 -- ============================================================
 -- Five roles per ADR-0003 D7

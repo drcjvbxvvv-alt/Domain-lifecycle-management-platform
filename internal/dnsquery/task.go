@@ -158,6 +158,14 @@ func (h *HandleDriftCheck) ProcessTask(ctx context.Context, t *asynq.Task) error
 		return nil
 	}
 
+	// Stamp last_drift_at on the domain (best-effort; don't fail the task on DB error)
+	if err := h.domainStore.UpdateLastDriftAt(ctx, p.DomainID); err != nil {
+		h.logger.Warn("dns:drift_check — failed to stamp last_drift_at",
+			zap.Int64("domain_id", p.DomainID),
+			zap.Error(err),
+		)
+	}
+
 	h.logger.Warn("dns:drift_check — drift detected",
 		zap.String("fqdn", p.FQDN),
 		zap.Int("drift_count", result.DriftCount),

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, watch, h } from 'vue'
 import { useMessage, NButton, NDataTable, NTag, NSelect, NInput, NInputNumber,
-         NModal, NAlert, NPopconfirm, NTooltip, NSpin,
+         NModal, NAlert, NPopconfirm, NTooltip, NSpin, NForm, NFormItem,
          type DataTableColumns } from 'naive-ui'
 import type { VNodeChild } from 'vue'
 import { useDNSRecordStore } from '@/stores/dnsrecord'
@@ -9,6 +9,8 @@ import type { ManagedRecord, ValidationError } from '@/types/dnsrecord'
 import { validateRecord, planTotalChanges } from '@/types/dnsrecord'
 import type { DomainPermissionLevel } from '@/types/permission'
 import { hasPermission } from '@/types/permission'
+import { dnsTemplateApi } from '@/api/dnstemplate'
+import type { DNSTemplate } from '@/types/dnstemplate'
 
 const props = defineProps<{
   domainId: number
@@ -16,12 +18,88 @@ const props = defineProps<{
   hasDnsProvider: boolean
   /** Caller's effective permission on this domain. Empty = no access. */
   myPermission?: DomainPermissionLevel | ''
+  /** ISO timestamp of last detected drift (from domains.last_drift_at). */
+  lastDriftAt?: string | null
 }>()
 
 /** Whether the current user can edit records (editor or above). */
 const canEdit = () => hasPermission(props.myPermission ?? '', 'editor')
 /** Whether the current user can apply plans (admin only). */
 const canApply = () => hasPermission(props.myPermission ?? '', 'admin')
+
+// ── Drift indicator ───────────────────────────────────────────────────────────
+/** True if drift was detected within the last 24 hours. */
+const hasDrift = computed(() => {
+  if (!props.lastDriftAt) return false
+  const age = Date.now() - new Date(props.lastDriftAt).getTime()
+  return age < 24 * 60 * 60 * 1000
+})
+
+// ── Apply Template modal ──────────────────────────────────────────────────────
+const showTemplateModal   = ref(false)
+const templateLoading     = ref(false)
+const templateApplying    = ref(false)
+const templates           = ref<DNSTemplate[]>([])
+const selectedTemplateId  = ref<number | null>(null)
+const templateVars        = ref<Record<string, string>>({})
+
+const selectedTemplate = computed(() =>
+  templates.value.find(t => t.id === selectedTemplateId.value) ?? null
+)
+const templateVarKeys = computed(() =>
+  selectedTemplate.value ? Object.keys(selectedTemplate.value.variables) : []
+)
+
+async function openTemplateModal() {
+  showTemplateModal.value = true
+  selectedTemplateId.value = null
+  templateVars.value = {}
+  templateLoading.value = true
+  try {
+    const res = await dnsTemplateApi.list()
+    templates.value = res.data.items
+  } catch {
+    message.error('載入範本失敗')
+  } finally {
+    templateLoading.value = false
+  }
+}
+
+function onTemplateSelect(id: number | null) {
+  selectedTemplateId.value = id
+  // Pre-fill variable map with empty strings for each key
+  const tmpl = templates.value.find(t => t.id === id)
+  templateVars.value = tmpl ? Object.fromEntries(Object.keys(tmpl.variables).map(k => [k, ''])) : {}
+}
+
+async function handleApplyTemplate() {
+  if (!selectedTemplateId.value) { message.warning('請選擇一個範本'); return }
+  // Check all required vars are filled
+  const missing = templateVarKeys.value.filter(k => !templateVars.value[k]?.trim())
+  if (missing.length) { message.warning(`請填入變數：${missing.join(', ')}`); return }
+
+  templateApplying.value = true
+  try {
+    const res = await dnsTemplateApi.applyTemplate(props.domainId, selectedTemplateId.value, templateVars.value)
+    const rendered = res.data.records
+    // Stage each rendered record as a create
+    for (const r of rendered) {
+      dnsStore.stageCreate({
+        type: r.type,
+        name: r.name,
+        content: r.content,
+        ttl: r.ttl,
+        priority: r.priority,
+      })
+    }
+    message.success(`已暫存 ${rendered.length} 筆記錄，請在右上角套用計畫`)
+    showTemplateModal.value = false
+  } catch (e: any) {
+    message.error(e?.response?.data?.message || '套用範本失敗')
+  } finally {
+    templateApplying.value = false
+  }
+}
 
 const message  = useMessage()
 const dnsStore = useDNSRecordStore()
@@ -324,6 +402,12 @@ function changeType(action: string): 'success' | 'warning' | 'error' {
     </template>
 
     <template v-else>
+      <!-- Drift indicator banner -->
+      <NAlert v-if="hasDrift" type="warning" style="margin-bottom:12px">
+        ⚠️ Drift 偵測到 DNS 記錄異動（最近偵測時間：{{ lastDriftAt ? new Date(lastDriftAt).toLocaleString('zh-TW') : '' }}）
+        — 請確認 DNS 供應商側的記錄是否符合預期。
+      </NAlert>
+
       <!-- Toolbar -->
       <div class="dns-toolbar">
         <NSelect
@@ -346,6 +430,13 @@ function changeType(action: string): 'success' | 'warning' | 'error' {
           @click="showCreateForm = true"
         >
           + 新增記錄
+        </NButton>
+        <NButton
+          v-if="canEdit()"
+          size="small"
+          @click="openTemplateModal"
+        >
+          套用範本
         </NButton>
 
         <div style="flex:1" />
@@ -545,6 +636,61 @@ function changeType(action: string): 'success' | 'warning' | 'error' {
           </template>
         </div>
       </div>
+    </NModal>
+
+    <!-- Apply Template modal -->
+    <NModal v-model:show="showTemplateModal" preset="card" title="套用 DNS 範本"
+            style="width:520px;max-width:95vw" :mask-closable="false">
+      <NSpin :show="templateLoading">
+        <NForm label-placement="top" :show-feedback="false">
+          <NFormItem label="選擇範本">
+            <NSelect
+              :value="selectedTemplateId"
+              :options="templates.map(t => ({ label: `${t.name} (${t.record_count} 筆記錄)`, value: t.id }))"
+              placeholder="請選擇範本"
+              clearable
+              @update:value="onTemplateSelect"
+            />
+          </NFormItem>
+
+          <!-- Variable inputs — only shown when template is selected -->
+          <template v-if="selectedTemplate && templateVarKeys.length > 0">
+            <div style="margin-bottom:8px;font-weight:500;font-size:13px">填入變數值</div>
+            <NFormItem v-for="varKey in templateVarKeys" :key="varKey" :label="`{{${varKey}}}`">
+              <NInput
+                v-model:value="templateVars[varKey]"
+                :placeholder="`請輸入 ${varKey} 的值`"
+                size="small"
+              />
+            </NFormItem>
+          </template>
+
+          <!-- Preview of records this template will create -->
+          <template v-if="selectedTemplate">
+            <div style="margin-top:12px;margin-bottom:6px;font-weight:500;font-size:13px">
+              範本記錄預覽（{{ selectedTemplate.record_count }} 筆）
+            </div>
+            <div v-for="(r, i) in selectedTemplate.records" :key="i"
+                 style="font-size:12px;font-family:monospace;color:#555;margin-bottom:2px">
+              <NTag size="small" :bordered="false" type="info" style="margin-right:4px">{{ r.type }}</NTag>
+              {{ r.name }} → {{ r.content }}
+              <span style="color:#999;margin-left:4px">TTL {{ r.ttl }}</span>
+            </div>
+          </template>
+        </NForm>
+
+        <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:16px">
+          <NButton @click="showTemplateModal = false">取消</NButton>
+          <NButton
+            type="primary"
+            :loading="templateApplying"
+            :disabled="!selectedTemplateId"
+            @click="handleApplyTemplate"
+          >
+            暫存記錄
+          </NButton>
+        </div>
+      </NSpin>
     </NModal>
   </div>
 </template>

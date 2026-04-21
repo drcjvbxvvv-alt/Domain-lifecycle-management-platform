@@ -620,6 +620,10 @@ func domainResponse(d *postgres.Domain) gin.H {
 		"notes":    d.Notes,
 		"metadata": d.Metadata,
 
+		// Drift / sync tracking
+		"last_sync_at":  d.LastSyncAt,
+		"last_drift_at": d.LastDriftAt,
+
 		"created_at": d.CreatedAt,
 		"updated_at": d.UpdatedAt,
 	}

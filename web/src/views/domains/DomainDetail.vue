@@ -788,6 +788,7 @@ onMounted(async () => {
                 :fqdn="store.current.fqdn"
                 :has-dns-provider="!!store.current.dns_provider_id"
                 :my-permission="myPermission"
+                :last-drift-at="store.current.last_drift_at"
               />
             </div>
           </NTabPane>

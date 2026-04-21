@@ -65,6 +65,10 @@ type Domain struct {
 	Notes    *string         `db:"notes"`
 	Metadata json.RawMessage `db:"metadata"`
 
+	// Drift / sync tracking (PB.7)
+	LastSyncAt  *time.Time `db:"last_sync_at"`
+	LastDriftAt *time.Time `db:"last_drift_at"`
+
 	// Timestamps
 	CreatedAt time.Time  `db:"created_at"`
 	UpdatedAt time.Time  `db:"updated_at"`
@@ -636,4 +640,24 @@ func (s *DomainStore) ListExpiring(ctx context.Context, days int) ([]Domain, err
 		return nil, fmt.Errorf("list expiring domains: %w", err)
 	}
 	return domains, nil
+}
+
+// UpdateLastDriftAt stamps domains.last_drift_at = NOW() for the given domain.
+func (s *DomainStore) UpdateLastDriftAt(ctx context.Context, domainID int64) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE domains SET last_drift_at = NOW(), updated_at = NOW() WHERE id = $1`, domainID)
+	if err != nil {
+		return fmt.Errorf("update last_drift_at: %w", err)
+	}
+	return nil
+}
+
+// UpdateLastSyncAt stamps domains.last_sync_at = NOW() for the given domain.
+func (s *DomainStore) UpdateLastSyncAt(ctx context.Context, domainID int64) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE domains SET last_sync_at = NOW(), updated_at = NOW() WHERE id = $1`, domainID)
+	if err != nil {
+		return fmt.Errorf("update last_sync_at: %w", err)
+	}
+	return nil
 }

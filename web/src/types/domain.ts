@@ -56,6 +56,10 @@ export interface DomainResponse {
   notes:    string | null
   metadata: Record<string, unknown> | null
 
+  // Drift / sync tracking (PB.7)
+  last_sync_at:  string | null
+  last_drift_at: string | null
+
   created_at: string
   updated_at: string
 }
