@@ -18,4 +18,12 @@ var (
 	// ErrDuplicateFQDN is returned when attempting to register a domain with
 	// an FQDN that already exists.
 	ErrDuplicateFQDN = errors.New("domain fqdn already exists")
+
+	// ErrTransferAlreadyPending is returned when a transfer is initiated on
+	// a domain that already has a pending transfer.
+	ErrTransferAlreadyPending = errors.New("domain already has a pending transfer")
+
+	// ErrNoActiveTransfer is returned when completing or cancelling a transfer
+	// but no pending transfer exists.
+	ErrNoActiveTransfer = errors.New("domain has no active transfer to complete or cancel")
 )

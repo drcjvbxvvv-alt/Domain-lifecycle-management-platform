@@ -262,6 +262,222 @@ func (s *DomainStore) UpdateTransferStatus(ctx context.Context, domainID int64, 
 	return nil
 }
 
+// ListFilter holds optional filters for querying domains.
+type ListFilter struct {
+	ProjectID      *int64
+	RegistrarID    *int64 // matches via registrar_accounts.registrar_id
+	DNSProviderID  *int64
+	TLD            *string
+	ExpiryStatus   *string
+	LifecycleState *string
+	Cursor         int64
+	Limit          int
+}
+
+// ListWithFilter returns domains matching the given filters with cursor pagination.
+func (s *DomainStore) ListWithFilter(ctx context.Context, f ListFilter) ([]Domain, error) {
+	if f.Limit <= 0 {
+		f.Limit = 20
+	}
+	if f.Limit > 200 {
+		f.Limit = 200
+	}
+
+	q := `SELECT ` + domainColumns + ` FROM domains d WHERE d.deleted_at IS NULL AND d.id > $1`
+	args := []any{f.Cursor}
+	n := 2
+
+	if f.ProjectID != nil {
+		q += fmt.Sprintf(` AND d.project_id = $%d`, n)
+		args = append(args, *f.ProjectID)
+		n++
+	}
+	if f.RegistrarID != nil {
+		q += fmt.Sprintf(` AND d.registrar_account_id IN (SELECT id FROM registrar_accounts WHERE registrar_id = $%d AND deleted_at IS NULL)`, n)
+		args = append(args, *f.RegistrarID)
+		n++
+	}
+	if f.DNSProviderID != nil {
+		q += fmt.Sprintf(` AND d.dns_provider_id = $%d`, n)
+		args = append(args, *f.DNSProviderID)
+		n++
+	}
+	if f.TLD != nil {
+		q += fmt.Sprintf(` AND d.tld = $%d`, n)
+		args = append(args, *f.TLD)
+		n++
+	}
+	if f.ExpiryStatus != nil {
+		q += fmt.Sprintf(` AND d.expiry_status = $%d`, n)
+		args = append(args, *f.ExpiryStatus)
+		n++
+	}
+	if f.LifecycleState != nil {
+		q += fmt.Sprintf(` AND d.lifecycle_state = $%d`, n)
+		args = append(args, *f.LifecycleState)
+		n++
+	}
+
+	q += fmt.Sprintf(` ORDER BY d.id ASC LIMIT $%d`, n)
+	args = append(args, f.Limit)
+
+	var domains []Domain
+	if err := s.db.SelectContext(ctx, &domains, q, args...); err != nil {
+		return nil, fmt.Errorf("list domains with filter: %w", err)
+	}
+	return domains, nil
+}
+
+// CountWithFilter returns the total count matching the given filters.
+func (s *DomainStore) CountWithFilter(ctx context.Context, f ListFilter) (int64, error) {
+	q := `SELECT COUNT(*) FROM domains d WHERE d.deleted_at IS NULL`
+	args := []any{}
+	n := 1
+
+	if f.ProjectID != nil {
+		q += fmt.Sprintf(` AND d.project_id = $%d`, n)
+		args = append(args, *f.ProjectID)
+		n++
+	}
+	if f.RegistrarID != nil {
+		q += fmt.Sprintf(` AND d.registrar_account_id IN (SELECT id FROM registrar_accounts WHERE registrar_id = $%d AND deleted_at IS NULL)`, n)
+		args = append(args, *f.RegistrarID)
+		n++
+	}
+	if f.DNSProviderID != nil {
+		q += fmt.Sprintf(` AND d.dns_provider_id = $%d`, n)
+		args = append(args, *f.DNSProviderID)
+		n++
+	}
+	if f.TLD != nil {
+		q += fmt.Sprintf(` AND d.tld = $%d`, n)
+		args = append(args, *f.TLD)
+		n++
+	}
+	if f.ExpiryStatus != nil {
+		q += fmt.Sprintf(` AND d.expiry_status = $%d`, n)
+		args = append(args, *f.ExpiryStatus)
+		n++
+	}
+	if f.LifecycleState != nil {
+		q += fmt.Sprintf(` AND d.lifecycle_state = $%d`, n)
+		args = append(args, *f.LifecycleState)
+		n++
+	}
+
+	var count int64
+	if err := s.db.GetContext(ctx, &count, q, args...); err != nil {
+		return 0, fmt.Errorf("count domains with filter: %w", err)
+	}
+	return count, nil
+}
+
+// RegistrarCount is used by GetStats.
+type RegistrarCount struct {
+	RegistrarName string `db:"registrar_name"`
+	Count         int64  `db:"count"`
+}
+
+// TLDCount is used by GetStats.
+type TLDCount struct {
+	TLD   string `db:"tld"`
+	Count int64  `db:"count"`
+}
+
+// LifecycleCount is used by GetStats.
+type LifecycleCount struct {
+	State string `db:"lifecycle_state"`
+	Count int64  `db:"count"`
+}
+
+// DomainStats holds aggregate statistics for a project (or globally).
+type DomainStats struct {
+	Total       int64
+	ByRegistrar []RegistrarCount
+	ByTLD       []TLDCount
+	ByLifecycle []LifecycleCount
+	Expiring30d int64
+	Expiring7d  int64
+}
+
+// GetStats returns aggregate domain statistics for a project (pass nil for global).
+func (s *DomainStore) GetStats(ctx context.Context, projectID *int64) (*DomainStats, error) {
+	scope := `deleted_at IS NULL`
+	args := []any{}
+	n := 1
+	if projectID != nil {
+		scope += fmt.Sprintf(` AND project_id = $%d`, n)
+		args = append(args, *projectID)
+		n++
+	}
+
+	var total int64
+	if err := s.db.GetContext(ctx, &total, `SELECT COUNT(*) FROM domains WHERE `+scope, args...); err != nil {
+		return nil, fmt.Errorf("stats total: %w", err)
+	}
+
+	var byRegistrar []RegistrarCount
+	registrarArgs := append(args, args...) // same where args
+	registrarQ := `
+		SELECT COALESCE(r.name, 'unassigned') AS registrar_name, COUNT(*) AS count
+		FROM domains d
+		LEFT JOIN registrar_accounts ra ON d.registrar_account_id = ra.id
+		LEFT JOIN registrars r ON ra.registrar_id = r.id
+		WHERE d.` + scope + `
+		GROUP BY r.name ORDER BY count DESC LIMIT 50`
+	if err := s.db.SelectContext(ctx, &byRegistrar, registrarQ, args...); err != nil {
+		return nil, fmt.Errorf("stats by registrar: %w", err)
+	}
+	_ = registrarArgs
+
+	var byTLD []TLDCount
+	tldQ := `
+		SELECT COALESCE(tld, 'unknown') AS tld, COUNT(*) AS count
+		FROM domains WHERE ` + scope + `
+		GROUP BY tld ORDER BY count DESC LIMIT 50`
+	if err := s.db.SelectContext(ctx, &byTLD, tldQ, args...); err != nil {
+		return nil, fmt.Errorf("stats by tld: %w", err)
+	}
+
+	var byLifecycle []LifecycleCount
+	lifecycleQ := `
+		SELECT lifecycle_state, COUNT(*) AS count
+		FROM domains WHERE ` + scope + `
+		GROUP BY lifecycle_state ORDER BY lifecycle_state`
+	if err := s.db.SelectContext(ctx, &byLifecycle, lifecycleQ, args...); err != nil {
+		return nil, fmt.Errorf("stats by lifecycle: %w", err)
+	}
+
+	// Expiring counts — independent of project filter for now
+	expiring30Scope := `deleted_at IS NULL AND expiry_date IS NOT NULL AND expiry_date <= CURRENT_DATE + INTERVAL '30 days' AND lifecycle_state != 'retired'`
+	expiring7Scope  := `deleted_at IS NULL AND expiry_date IS NOT NULL AND expiry_date <= CURRENT_DATE + INTERVAL '7 days' AND lifecycle_state != 'retired'`
+	if projectID != nil {
+		expiring30Scope += fmt.Sprintf(` AND project_id = $%d`, n)
+		expiring7Scope  += fmt.Sprintf(` AND project_id = $%d`, n)
+	}
+
+	var expiring30, expiring7 int64
+	expiryArgs := args
+	if projectID != nil {
+		expiryArgs = append([]any{}, args...)
+	}
+	if err := s.db.GetContext(ctx, &expiring30, `SELECT COUNT(*) FROM domains WHERE `+expiring30Scope, expiryArgs...); err != nil {
+		return nil, fmt.Errorf("stats expiring 30d: %w", err)
+	}
+	if err := s.db.GetContext(ctx, &expiring7, `SELECT COUNT(*) FROM domains WHERE `+expiring7Scope, expiryArgs...); err != nil {
+		return nil, fmt.Errorf("stats expiring 7d: %w", err)
+	}
+
+	return &DomainStats{
+		Total:       total,
+		ByRegistrar: byRegistrar,
+		ByTLD:       byTLD,
+		ByLifecycle: byLifecycle,
+		Expiring30d: expiring30,
+		Expiring7d:  expiring7,
+	}, nil
+}
+
 // ListExpiring returns domains expiring within the given number of days.
 func (s *DomainStore) ListExpiring(ctx context.Context, days int) ([]Domain, error) {
 	var domains []Domain

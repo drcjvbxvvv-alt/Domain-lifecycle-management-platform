@@ -351,6 +351,8 @@ to. They must be manageable before domains can be assigned to them.
 
 ### PA.3 — Domain Asset Extension (API + UI)
 
+**Status**: ✅ COMPLETED 2026-04-21
+
 **Owner**: Sonnet
 **Depends on**: PA.1 (extended domain model), PA.2 (registrar/provider selectors)
 **Reads first**: `docs/DOMAIN_ASSET_LAYER_DESIGN.md` §3.2 "domains table",
@@ -437,6 +439,58 @@ asset data.
 - `GET /api/v1/domains/expiring?days=30` returns correct domains
 - `GET /api/v1/domains/stats` returns counts grouped by registrar, TLD
 - `npm run build` + `go test ./...` passes
+
+**Delivered (2026-04-21)**:
+
+- `store/postgres/domain.go` — Added `ListFilter` struct with optional pointer
+  fields; `ListWithFilter()` + `CountWithFilter()` using dynamic positional-param
+  WHERE clause; `DomainStats` + `GetStats()` aggregate query
+- `internal/lifecycle/errors.go` — Added `ErrTransferAlreadyPending`,
+  `ErrNoActiveTransfer` sentinel errors
+- `internal/lifecycle/service.go` — Complete rewrite:
+  - `ExtractTLD(fqdn)` — ccSLD heuristic (handles `.co.uk`, `.com.au`, etc.)
+  - Extended `RegisterInput` with all asset fields (RegistrarAccountID,
+    DNSProviderID, ExpiryDate, AutoRenew, AnnualCost, Currency, Purpose, Notes)
+  - `Register()` now auto-extracts and stores TLD from FQDN
+  - `ListInput` with `*int64` optional filters (ProjectID, RegistrarID,
+    DNSProviderID) + TLD/LifecycleState/ExpiryStatus string filters + cursor/limit
+  - `UpdateAssetInput` + `UpdateAsset()` — updates all non-identity asset fields
+  - `InitiateTransfer()`, `CompleteTransfer()`, `CancelTransfer()` — transfer
+    state machine with sentinel error guards
+  - `ListExpiring(days)`, `GetStats(projectID)` — aggregate queries
+- `internal/lifecycle/tld_test.go` — 29 TLD extraction test cases covering simple
+  TLDs, ccSLDs (`.co.uk`, `.com.au`, `.org.uk`), uppercase normalization, single-
+  label FQDNs; plus sentinel error distinctness tests; all 29 pass
+- `api/handler/domain.go` — Complete rewrite:
+  - Extended `RegisterDomainRequest` + `UpdateDomainAssetRequest` request DTOs
+  - `domainResponse()` — now returns 30+ fields (identity, provider binding,
+    dates, status flags, transfer tracking, DNS, WHOIS, financial, metadata)
+  - `Register()`, `Get()`, `List()`, `UpdateAsset()`, `Transition()` handlers
+  - `Expiring()`, `Stats()` handlers
+  - `InitiateTransfer()`, `CompleteTransfer()`, `CancelTransfer()` handlers
+- `api/router/router.go` — Added domain routes in correct order:
+  `GET /expiring`, `GET /stats` registered before `/:id`; added `PUT /:id`,
+  `POST /:id/transfer`, `POST /:id/transfer/complete`, `POST /:id/transfer/cancel`
+- `web/src/types/domain.ts` — Full rewrite with `DomainResponse` (30+ fields),
+  `RegisterDomainRequest`, `UpdateDomainAssetRequest`, `InitiateTransferRequest`,
+  `DomainStats`, `DomainLifecycleHistoryEntry`, `TransferStatus`, `ExpiryStatus`
+- `web/src/api/domain.ts` — Full rewrite with all endpoints: list, get, register,
+  updateAsset, transition, history, expiring, stats, initiateTransfer,
+  completeTransfer, cancelTransfer
+- `web/src/stores/domain.ts` — Full rewrite with all store actions matching new API
+- `web/src/views/domains/DomainList.vue` — Full rewrite:
+  - New columns: TLD, expiry_date (color-coded — red ≤7d, orange ≤30d), auto_renew,
+    annual_cost with currency
+  - Filter bar: lifecycle state, registrar, DNS provider, TLD input, expiry status
+  - Extended create form with registrar+account (cascading selectors), DNS provider,
+    NDatePicker for expiry, NSwitch for auto-renew, cost fields (amount + currency)
+- `web/src/views/domains/DomainDetail.vue` — Full rewrite with 3-tab layout:
+  - "資產" tab: registration info (NDescriptions), financial info, DNS+security flags
+  - "轉移" tab: transfer status display + initiate/complete/cancel flow with modals
+  - "歷史" tab: lifecycle state history timeline (preserved from original)
+  - Edit asset modal: full form with all updatable fields
+- `go build ./...` passes; `go test ./internal/lifecycle/...` 29 tests pass;
+  `npm run build` zero TypeScript errors, zero warnings
 
 ---
 

@@ -56,13 +56,24 @@ func RegisterV1(r *gin.Engine, deps Deps) {
 		}
 
 		// ── Domains ───────────────────────────────────────────────────
+		// NOTE: static sub-paths (expiring, stats) MUST be registered before
+		// the :id param route — otherwise Gin routes "expiring" as an ID.
 		domains := authed.Group("/domains")
 		{
 			domains.POST("", middleware.RequireAnyRole("operator", "release_manager", "admin"), deps.DomainHandler.Register)
 			domains.GET("", middleware.RequireAnyRole("viewer", "operator", "release_manager", "admin", "auditor"), deps.DomainHandler.List)
+			// Static sub-paths (before /:id)
+			domains.GET("/expiring", middleware.RequireAnyRole("viewer", "operator", "release_manager", "admin", "auditor"), deps.DomainHandler.Expiring)
+			domains.GET("/stats", middleware.RequireAnyRole("viewer", "operator", "release_manager", "admin", "auditor"), deps.DomainHandler.Stats)
+			// Parameterized routes
 			domains.GET("/:id", middleware.RequireAnyRole("viewer", "operator", "release_manager", "admin", "auditor"), deps.DomainHandler.Get)
+			domains.PUT("/:id", middleware.RequireAnyRole("operator", "release_manager", "admin"), deps.DomainHandler.UpdateAsset)
 			domains.POST("/:id/transition", middleware.RequireAnyRole("operator", "release_manager", "admin"), deps.DomainHandler.Transition)
 			domains.GET("/:id/history", middleware.RequireAnyRole("viewer", "operator", "release_manager", "admin", "auditor"), deps.DomainHandler.History)
+			// Transfer tracking
+			domains.POST("/:id/transfer", middleware.RequireAnyRole("operator", "release_manager", "admin"), deps.DomainHandler.InitiateTransfer)
+			domains.POST("/:id/transfer/complete", middleware.RequireAnyRole("operator", "release_manager", "admin"), deps.DomainHandler.CompleteTransfer)
+			domains.POST("/:id/transfer/cancel", middleware.RequireAnyRole("operator", "release_manager", "admin"), deps.DomainHandler.CancelTransfer)
 		}
 
 		// ── Templates (individual) ─────────────────────────────────────

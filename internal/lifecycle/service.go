@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"go.uber.org/zap"
 
@@ -23,6 +24,8 @@ func NewService(domains *postgres.DomainStore, lifecycle *postgres.LifecycleStor
 	return &Service{domains: domains, lifecycle: lifecycle, logger: logger}
 }
 
+// ── State machine ─────────────────────────────────────────────────────────────
+
 // Transition atomically moves a domain from one lifecycle state to another.
 //
 // The method:
@@ -37,12 +40,10 @@ func NewService(domains *postgres.DomainStore, lifecycle *postgres.LifecycleStor
 // If a concurrent caller has already changed the state, ErrLifecycleRaceCondition
 // is returned. The caller should retry or inform the user.
 func (s *Service) Transition(ctx context.Context, domainID int64, from, to, reason, triggeredBy string) error {
-	// Step 1: validate the edge
 	if !CanLifecycleTransition(from, to) {
 		return fmt.Errorf("transition %q → %q: %w", from, to, ErrInvalidLifecycleState)
 	}
 
-	// Step 2-7: transactional update
 	tx, err := s.lifecycle.BeginTx(ctx)
 	if err != nil {
 		return fmt.Errorf("begin tx: %w", err)
@@ -51,7 +52,6 @@ func (s *Service) Transition(ctx context.Context, domainID int64, from, to, reas
 
 	err = s.lifecycle.TransitionTx(ctx, tx, domainID, from, to, reason, triggeredBy)
 	if err != nil {
-		// Unwrap the store-level race error and re-wrap with our domain error
 		if errors.Is(err, postgres.ErrLifecycleRaceCondition) {
 			return ErrLifecycleRaceCondition
 		}
@@ -73,23 +73,75 @@ func (s *Service) Transition(ctx context.Context, domainID int64, from, to, reas
 	return nil
 }
 
+// ── TLD extraction ────────────────────────────────────────────────────────────
+
+// ExtractTLD returns the TLD portion of an FQDN (with leading dot).
+// Handles common ccSLDs (co.uk, com.au, etc.) without requiring a full PSL library.
+// The heuristic: if the last label is a 2-letter ccTLD and the second-to-last
+// label is ≤ 4 characters (e.g. "co", "com", "net", "org", "gov"), treat it
+// as a 2-level TLD.
+//
+// Examples:
+//
+//	"example.com"        → ".com"
+//	"www.example.com"    → ".com"
+//	"test.co.uk"         → ".co.uk"
+//	"api.example.co.uk"  → ".co.uk"
+//	"shop.example.com.au"→ ".com.au"
+//	"example.io"         → ".io"
+func ExtractTLD(fqdn string) string {
+	fqdn = strings.TrimSuffix(strings.ToLower(fqdn), ".")
+	parts := strings.Split(fqdn, ".")
+	n := len(parts)
+	if n < 2 {
+		return "." + fqdn
+	}
+	last := parts[n-1]
+	secondToLast := parts[n-2]
+	// ccSLD heuristic: last part is 2-letter ccTLD, second-to-last ≤ 4 chars
+	if len(last) == 2 && len(secondToLast) <= 4 && n >= 3 {
+		return "." + secondToLast + "." + last
+	}
+	return "." + last
+}
+
+// ── Registration ──────────────────────────────────────────────────────────────
+
 // Register creates a new domain in the "requested" state.
 // This is the documented exception to the Transition() rule: there is no
 // nil → requested edge. The domain_lifecycle_history row is inserted manually.
 type RegisterInput struct {
-	ProjectID     int64
-	FQDN          string
-	OwnerUserID   *int64
-	DNSProviderID *int64
-	TriggeredBy   string
+	ProjectID          int64
+	FQDN               string
+	OwnerUserID        *int64
+	DNSProviderID      *int64
+	RegistrarAccountID *int64
+	RegistrationDate   *time.Time
+	ExpiryDate         *time.Time
+	AutoRenew          bool
+	AnnualCost         *float64
+	Currency           *string
+	Purpose            *string
+	Notes              *string
+	TriggeredBy        string
 }
 
 func (s *Service) Register(ctx context.Context, in RegisterInput) (*postgres.Domain, error) {
+	tld := ExtractTLD(in.FQDN)
 	d := &postgres.Domain{
-		ProjectID:     in.ProjectID,
-		FQDN:          in.FQDN,
-		OwnerUserID:   in.OwnerUserID,
-		DNSProviderID: in.DNSProviderID,
+		ProjectID:          in.ProjectID,
+		FQDN:               in.FQDN,
+		TLD:                &tld,
+		OwnerUserID:        in.OwnerUserID,
+		DNSProviderID:      in.DNSProviderID,
+		RegistrarAccountID: in.RegistrarAccountID,
+		RegistrationDate:   in.RegistrationDate,
+		ExpiryDate:         in.ExpiryDate,
+		AutoRenew:          in.AutoRenew,
+		AnnualCost:         in.AnnualCost,
+		Currency:           in.Currency,
+		Purpose:            in.Purpose,
+		Notes:              in.Notes,
 	}
 
 	created, err := s.domains.Create(ctx, d)
@@ -120,20 +172,31 @@ func (s *Service) Register(ctx context.Context, in RegisterInput) (*postgres.Dom
 	s.logger.Info("domain registered",
 		zap.Int64("id", created.ID),
 		zap.String("fqdn", created.FQDN),
+		zap.String("tld", tld),
 		zap.Int64("project_id", created.ProjectID),
 	)
 
 	return created, nil
 }
 
+// ── Read ──────────────────────────────────────────────────────────────────────
+
 func (s *Service) GetByID(ctx context.Context, id int64) (*postgres.Domain, error) {
 	return s.domains.GetByID(ctx, id)
 }
 
+// ── List ──────────────────────────────────────────────────────────────────────
+
+// ListInput supports both legacy (project_id only) and extended filtering.
 type ListInput struct {
-	ProjectID int64
-	Cursor    int64
-	Limit     int
+	ProjectID      *int64
+	RegistrarID    *int64
+	DNSProviderID  *int64
+	TLD            *string
+	ExpiryStatus   *string
+	LifecycleState *string
+	Cursor         int64
+	Limit          int
 }
 
 type ListResult struct {
@@ -143,11 +206,22 @@ type ListResult struct {
 }
 
 func (s *Service) List(ctx context.Context, in ListInput) (*ListResult, error) {
-	items, err := s.domains.ListByProject(ctx, in.ProjectID, in.Cursor, in.Limit)
+	f := postgres.ListFilter{
+		ProjectID:      in.ProjectID,
+		RegistrarID:    in.RegistrarID,
+		DNSProviderID:  in.DNSProviderID,
+		TLD:            in.TLD,
+		ExpiryStatus:   in.ExpiryStatus,
+		LifecycleState: in.LifecycleState,
+		Cursor:         in.Cursor,
+		Limit:          in.Limit,
+	}
+
+	items, err := s.domains.ListWithFilter(ctx, f)
 	if err != nil {
 		return nil, err
 	}
-	total, err := s.domains.CountByProject(ctx, in.ProjectID)
+	total, err := s.domains.CountWithFilter(ctx, f)
 	if err != nil {
 		return nil, err
 	}
@@ -158,6 +232,158 @@ func (s *Service) List(ctx context.Context, in ListInput) (*ListResult, error) {
 	return &ListResult{Items: items, Total: total, Cursor: nextCursor}, nil
 }
 
+// ── Update asset fields ───────────────────────────────────────────────────────
+
+type UpdateAssetInput struct {
+	ID                 int64
+	RegistrarAccountID *int64
+	DNSProviderID      *int64
+	RegistrationDate   *time.Time
+	ExpiryDate         *time.Time
+	AutoRenew          bool
+	GraceEndDate       *time.Time
+	TransferLock       bool
+	Hold               bool
+	DNSSECEnabled      bool
+	WhoisPrivacy       bool
+	AnnualCost         *float64
+	Currency           *string
+	PurchasePrice      *float64
+	FeeFixed           bool
+	Purpose            *string
+	Notes              *string
+}
+
+func (s *Service) UpdateAsset(ctx context.Context, in UpdateAssetInput) (*postgres.Domain, error) {
+	existing, err := s.domains.GetByID(ctx, in.ID)
+	if errors.Is(err, postgres.ErrDomainNotFound) {
+		return nil, ErrDomainNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get domain: %w", err)
+	}
+
+	// Apply changes
+	existing.RegistrarAccountID = in.RegistrarAccountID
+	existing.DNSProviderID = in.DNSProviderID
+	existing.RegistrationDate = in.RegistrationDate
+	existing.ExpiryDate = in.ExpiryDate
+	existing.AutoRenew = in.AutoRenew
+	existing.GraceEndDate = in.GraceEndDate
+	existing.TransferLock = in.TransferLock
+	existing.Hold = in.Hold
+	existing.DNSSECEnabled = in.DNSSECEnabled
+	existing.WhoisPrivacy = in.WhoisPrivacy
+	existing.AnnualCost = in.AnnualCost
+	existing.Currency = in.Currency
+	existing.PurchasePrice = in.PurchasePrice
+	existing.FeeFixed = in.FeeFixed
+	existing.Purpose = in.Purpose
+	existing.Notes = in.Notes
+
+	if err := s.domains.UpdateAssetFields(ctx, existing); err != nil {
+		return nil, fmt.Errorf("update domain asset: %w", err)
+	}
+
+	s.logger.Info("domain asset updated", zap.Int64("id", in.ID))
+	return s.domains.GetByID(ctx, in.ID)
+}
+
+// ── Transfer tracking ─────────────────────────────────────────────────────────
+
+type InitiateTransferInput struct {
+	DomainID                int64
+	GainingRegistrarAccount *string // name/reference of gaining registrar
+	Notes                   *string
+}
+
+func (s *Service) InitiateTransfer(ctx context.Context, in InitiateTransferInput) (*postgres.Domain, error) {
+	d, err := s.domains.GetByID(ctx, in.DomainID)
+	if errors.Is(err, postgres.ErrDomainNotFound) {
+		return nil, ErrDomainNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get domain: %w", err)
+	}
+
+	if d.TransferStatus != nil && *d.TransferStatus == "pending" {
+		return nil, ErrTransferAlreadyPending
+	}
+
+	status := "pending"
+	now := time.Now()
+	if err := s.domains.UpdateTransferStatus(ctx, in.DomainID, &status, in.GainingRegistrarAccount, &now, nil); err != nil {
+		return nil, fmt.Errorf("initiate transfer: %w", err)
+	}
+
+	s.logger.Info("domain transfer initiated",
+		zap.Int64("domain_id", in.DomainID),
+		zap.Stringp("gaining", in.GainingRegistrarAccount),
+	)
+	return s.domains.GetByID(ctx, in.DomainID)
+}
+
+func (s *Service) CompleteTransfer(ctx context.Context, domainID int64) (*postgres.Domain, error) {
+	d, err := s.domains.GetByID(ctx, domainID)
+	if errors.Is(err, postgres.ErrDomainNotFound) {
+		return nil, ErrDomainNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get domain: %w", err)
+	}
+
+	if d.TransferStatus == nil || *d.TransferStatus != "pending" {
+		return nil, ErrNoActiveTransfer
+	}
+
+	status := "completed"
+	now := time.Now()
+	if err := s.domains.UpdateTransferStatus(ctx, domainID, &status, d.TransferGainingRegistrar, d.TransferRequestedAt, &now); err != nil {
+		return nil, fmt.Errorf("complete transfer: %w", err)
+	}
+
+	s.logger.Info("domain transfer completed", zap.Int64("domain_id", domainID))
+	return s.domains.GetByID(ctx, domainID)
+}
+
+func (s *Service) CancelTransfer(ctx context.Context, domainID int64) (*postgres.Domain, error) {
+	d, err := s.domains.GetByID(ctx, domainID)
+	if errors.Is(err, postgres.ErrDomainNotFound) {
+		return nil, ErrDomainNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get domain: %w", err)
+	}
+
+	if d.TransferStatus == nil || *d.TransferStatus != "pending" {
+		return nil, ErrNoActiveTransfer
+	}
+
+	status := "cancelled"
+	if err := s.domains.UpdateTransferStatus(ctx, domainID, &status, nil, nil, nil); err != nil {
+		return nil, fmt.Errorf("cancel transfer: %w", err)
+	}
+
+	s.logger.Info("domain transfer cancelled", zap.Int64("domain_id", domainID))
+	return s.domains.GetByID(ctx, domainID)
+}
+
+// ── Stats & Expiry ────────────────────────────────────────────────────────────
+
+func (s *Service) ListExpiring(ctx context.Context, days int) ([]postgres.Domain, error) {
+	if days <= 0 {
+		days = 30
+	}
+	return s.domains.ListExpiring(ctx, days)
+}
+
+func (s *Service) GetStats(ctx context.Context, projectID *int64) (*postgres.DomainStats, error) {
+	return s.domains.GetStats(ctx, projectID)
+}
+
+// ── History ───────────────────────────────────────────────────────────────────
+
 func (s *Service) GetHistory(ctx context.Context, domainID int64) ([]postgres.LifecycleHistoryRow, error) {
 	return s.lifecycle.GetHistory(ctx, domainID, 100)
 }
+
