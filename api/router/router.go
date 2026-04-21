@@ -26,6 +26,7 @@ type Deps struct {
 	ExpiryHandler      *handler.ExpiryHandler
 	ImportHandler      *handler.ImportHandler
 	DNSQueryHandler    *handler.DNSQueryHandler
+	DNSRecordHandler   *handler.DNSRecordHandler
 	JWTManager         *auth.JWTManager
 }
 
@@ -100,6 +101,11 @@ func RegisterV1(r *gin.Engine, deps Deps) {
 			domains.GET("/:id/dns-records", middleware.RequireAnyRole("viewer", "operator", "release_manager", "admin", "auditor"), deps.DNSQueryHandler.LookupByDomain)
 			domains.GET("/:id/dns-propagation", middleware.RequireAnyRole("viewer", "operator", "release_manager", "admin", "auditor"), deps.DNSQueryHandler.PropagationByDomain)
 			domains.GET("/:id/dns-drift", middleware.RequireAnyRole("viewer", "operator", "release_manager", "admin", "auditor"), deps.DNSQueryHandler.DriftCheck)
+			// DNS record management via provider API
+			domains.GET("/:id/provider-records", middleware.RequireAnyRole("viewer", "operator", "release_manager", "admin", "auditor"), deps.DNSRecordHandler.ListRecords)
+			domains.POST("/:id/provider-records", middleware.RequireAnyRole("operator", "release_manager", "admin"), deps.DNSRecordHandler.CreateRecord)
+			domains.PUT("/:id/provider-records/:rid", middleware.RequireAnyRole("operator", "release_manager", "admin"), deps.DNSRecordHandler.UpdateRecord)
+			domains.DELETE("/:id/provider-records/:rid", middleware.RequireAnyRole("operator", "release_manager", "admin"), deps.DNSRecordHandler.DeleteRecord)
 		}
 
 		// ── Templates (individual) ─────────────────────────────────────

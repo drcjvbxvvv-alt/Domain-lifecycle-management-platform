@@ -20,7 +20,7 @@ import { useTagStore } from '@/stores/tag'
 import { domainApi } from '@/api/domain'
 import { dnsApi } from '@/api/dns'
 import type { DomainLifecycleHistoryEntry, UpdateDomainAssetRequest } from '@/types/domain'
-import type { DNSRecord, DNSLookupResult, PropagationResult, ResolverResult, DriftResult } from '@/types/dns'
+import type { DNSRecord, DNSLookupResult, PropagationResult, ResolverResult, DriftResult, ProviderRecord, CreateProviderRecordRequest } from '@/types/dns'
 import type { SSLCertResponse } from '@/types/ssl'
 import type { DomainCostResponse, CostType } from '@/types/cost'
 import type { DomainLifecycleState, ApiResponse } from '@/types/common'
@@ -402,6 +402,93 @@ async function handleDNSLookup() {
   }
 }
 
+// ── Provider records (CRUD) ──────────────────────────────────────────────────
+const provRecords      = ref<ProviderRecord[]>([])
+const provLoading      = ref(false)
+const showProvCreate   = ref(false)
+const provCreating     = ref(false)
+const provForm         = ref<CreateProviderRecordRequest>({
+  type: 'A', name: '', content: '', ttl: 1, priority: 0, proxied: false,
+})
+
+const provRecordTypes = [
+  { label: 'A',     value: 'A'     },
+  { label: 'AAAA',  value: 'AAAA'  },
+  { label: 'CNAME', value: 'CNAME' },
+  { label: 'MX',    value: 'MX'    },
+  { label: 'TXT',   value: 'TXT'   },
+  { label: 'NS',    value: 'NS'    },
+  { label: 'SRV',   value: 'SRV'   },
+  { label: 'CAA',   value: 'CAA'   },
+]
+
+async function loadProvRecords() {
+  provLoading.value = true
+  try {
+    const res = await dnsApi.listProviderRecords(domainId) as any
+    provRecords.value = res.data?.items ?? []
+  } catch (e: any) {
+    message.error(e?.response?.data?.message || '載入 Provider 記錄失敗')
+  } finally {
+    provLoading.value = false
+  }
+}
+
+async function handleProvCreate() {
+  if (!provForm.value.name || !provForm.value.content) {
+    message.warning('請填寫記錄名稱和值')
+    return
+  }
+  provCreating.value = true
+  try {
+    await dnsApi.createProviderRecord(domainId, provForm.value)
+    message.success('記錄已建立')
+    showProvCreate.value = false
+    provForm.value = { type: 'A', name: store.current?.fqdn ?? '', content: '', ttl: 1, priority: 0, proxied: false }
+    await loadProvRecords()
+  } catch (e: any) {
+    message.error(e?.response?.data?.message || '建立失敗')
+  } finally {
+    provCreating.value = false
+  }
+}
+
+async function handleProvDelete(recordId: string) {
+  try {
+    await dnsApi.deleteProviderRecord(domainId, recordId)
+    message.success('記錄已刪除')
+    await loadProvRecords()
+  } catch (e: any) {
+    message.error(e?.response?.data?.message || '刪除失敗')
+  }
+}
+
+const provColumns: DataTableColumns<ProviderRecord> = [
+  { title: '類型', key: 'type', width: 70,
+    render: (row): VNodeChild => h(NTag, { type: dnsRecordTypeColor[row.type] || 'default', size: 'small', bordered: false }, { default: () => row.type }),
+  },
+  { title: '名稱', key: 'name', ellipsis: { tooltip: true }, minWidth: 160 },
+  { title: '值', key: 'content', ellipsis: { tooltip: true }, minWidth: 160,
+    render: (row): VNodeChild => h('code', { style: 'font-size:12px' }, row.content),
+  },
+  { title: 'TTL', key: 'ttl', width: 70,
+    render: (row): VNodeChild => h('span', { style: 'font-family:var(--font-mono);font-size:12px' }, row.ttl === 1 ? 'Auto' : `${row.ttl}s`),
+  },
+  { title: '優先級', key: 'priority', width: 70,
+    render: (row): VNodeChild => row.priority ? String(row.priority) : '-',
+  },
+  {
+    title: '操作', key: 'actions', width: 80, fixed: 'right',
+    render: (row): VNodeChild => h(NPopconfirm,
+      { onPositiveClick: () => handleProvDelete(row.id) },
+      {
+        trigger: () => h(NButton, { size: 'small', type: 'error', quaternary: true }, { default: () => '刪除' }),
+        default: () => `確認刪除 ${row.type} 記錄？`,
+      },
+    ),
+  },
+]
+
 // ── Propagation check ────────────────────────────────────────────────────────
 const propLoading   = ref(false)
 const propResult    = ref<PropagationResult | null>(null)
@@ -751,6 +838,48 @@ onMounted(async () => {
 
               <div v-else style="padding:24px; text-align:center; color:var(--text-muted); font-size:13px;">
                 點擊「查詢 DNS 記錄」按鈕以取得此域名的即時 DNS 解析結果（A / AAAA / CNAME / MX / TXT / NS / SOA / SRV / CAA）
+              </div>
+            </div>
+          </NTabPane>
+
+          <!-- Provider Records (CRUD) tab -->
+          <NTabPane name="provider-records" :tab="`解析管理 (${provRecords.length})`">
+            <div class="tab-section">
+              <div style="display:flex; gap:8px; margin-bottom:12px; align-items:center;">
+                <NButton
+                  size="small"
+                  :loading="provLoading"
+                  :disabled="!store.current?.dns_provider_id"
+                  @click="loadProvRecords"
+                >
+                  重新載入
+                </NButton>
+                <NButton
+                  type="primary"
+                  size="small"
+                  :disabled="!store.current?.dns_provider_id"
+                  @click="showProvCreate = true"
+                >
+                  新增記錄
+                </NButton>
+                <span v-if="!store.current?.dns_provider_id" style="font-size:12px; color:var(--text-muted)">
+                  此域名未設定 DNS Provider，無法管理記錄
+                </span>
+              </div>
+
+              <NDataTable
+                v-if="provRecords.length > 0 || provLoading"
+                :columns="provColumns"
+                :data="provRecords"
+                :loading="provLoading"
+                :row-key="(r: ProviderRecord) => r.id"
+                size="small"
+                :max-height="400"
+                striped
+                :scroll-x="600"
+              />
+              <div v-else style="padding:24px; text-align:center; color:var(--text-muted); font-size:13px;">
+                點擊「重新載入」從 DNS Provider API 取得記錄，或「新增記錄」建立新的 DNS 解析。
               </div>
             </div>
           </NTabPane>
@@ -1109,6 +1238,44 @@ onMounted(async () => {
         <NSpace justify="end">
           <NButton @click="showSSLCreate = false">取消</NButton>
           <NButton type="primary" :loading="sslCreating" @click="handleSSLCreate">新增</NButton>
+        </NSpace>
+      </template>
+    </NModal>
+
+    <!-- Create provider record modal -->
+    <NModal
+      v-model:show="showProvCreate"
+      preset="card"
+      title="新增 DNS 記錄"
+      style="width: 520px"
+      :mask-closable="false"
+    >
+      <NForm label-placement="left" label-width="80px">
+        <NFormItem label="類型" required>
+          <NSelect v-model:value="(provForm as any).type" :options="provRecordTypes" style="width:120px" />
+        </NFormItem>
+        <NFormItem label="名稱" required>
+          <NInput v-model:value="provForm.name" :placeholder="store.current?.fqdn ?? 'example.com'" />
+        </NFormItem>
+        <NFormItem label="值" required>
+          <NInput v-model:value="provForm.content" placeholder="1.2.3.4 / cdn.example.com / ..." />
+        </NFormItem>
+        <NFormItem label="TTL">
+          <NInputNumber v-model:value="(provForm as any).ttl" :min="0" style="width:120px" />
+          <span style="margin-left:8px; font-size:12px; color:var(--text-muted)">0 或 1 = 自動</span>
+        </NFormItem>
+        <NFormItem v-if="provForm.type === 'MX' || provForm.type === 'SRV'" label="優先級">
+          <NInputNumber v-model:value="(provForm as any).priority" :min="0" style="width:120px" />
+        </NFormItem>
+        <NFormItem label="Proxied">
+          <NSwitch v-model:value="provForm.proxied" />
+          <span style="margin-left:8px; font-size:12px; color:var(--text-muted)">Cloudflare CDN 代理</span>
+        </NFormItem>
+      </NForm>
+      <template #footer>
+        <NSpace justify="end">
+          <NButton @click="showProvCreate = false">取消</NButton>
+          <NButton type="primary" :loading="provCreating" @click="handleProvCreate">建立</NButton>
         </NSpace>
       </template>
     </NModal>

@@ -24,6 +24,7 @@ import (
 	domainsvc "domain-platform/internal/domain"
 	"domain-platform/internal/dnsprovider"
 	"domain-platform/internal/dnsquery"
+	dnsrecsvc "domain-platform/internal/dnsrecord"
 	importsvc "domain-platform/internal/importer"
 	"domain-platform/internal/lifecycle"
 	"domain-platform/internal/project"
@@ -136,6 +137,9 @@ func main() {
 	dnsQuerySvc := dnsquery.NewService("", logger) // "" = auto-detect system resolver
 	dnsQueryHandler := handler.NewDNSQueryHandler(dnsQuerySvc, lifecycleSvc, dnsProviderStore, logger)
 
+	dnsRecordSvc := dnsrecsvc.NewService(dnsProviderStore, domainStore, logger)
+	dnsRecordHandler := handler.NewDNSRecordHandler(dnsRecordSvc, lifecycleSvc, logger)
+
 	// ── Management API listener (:8080, JWT auth) ──────────────────────────
 	mgmtRouter := buildManagementRouter(logger, router.Deps{
 		AuthHandler:        authHandler,
@@ -154,6 +158,7 @@ func main() {
 		ExpiryHandler:      expiryHandler,
 		ImportHandler:      importHandler,
 		DNSQueryHandler:    dnsQueryHandler,
+		DNSRecordHandler:   dnsRecordHandler,
 		JWTManager:         jwtMgr,
 	})
 	mgmtAddr := fmt.Sprintf("%s:%d", cfg.Server.Host, cfg.Server.Port)

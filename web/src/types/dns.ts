@@ -54,6 +54,36 @@ export interface DriftRecord {
   match: boolean
 }
 
+// ── Provider record types (for CRUD) ─────────────────────────────────────────
+
+export interface ProviderRecord {
+  id: string
+  type: string
+  name: string
+  content: string
+  ttl: number
+  priority?: number
+  proxied?: boolean
+}
+
+export interface CreateProviderRecordRequest {
+  type: string
+  name: string
+  content: string
+  ttl: number
+  priority?: number
+  proxied?: boolean
+}
+
+export interface UpdateProviderRecordRequest {
+  type: string
+  name: string
+  content: string
+  ttl: number
+  priority?: number
+  proxied?: boolean
+}
+
 export interface DriftResult {
   fqdn: string
   provider_name: string

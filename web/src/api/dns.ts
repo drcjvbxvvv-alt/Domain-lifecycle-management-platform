@@ -1,6 +1,6 @@
 import { http } from '@/utils/http'
 import type { ApiResponse } from '@/types/common'
-import type { DNSLookupResult, PropagationResult, DriftResult } from '@/types/dns'
+import type { DNSLookupResult, PropagationResult, DriftResult, ProviderRecord, CreateProviderRecordRequest, UpdateProviderRecordRequest } from '@/types/dns'
 
 export const dnsApi = {
   /** Look up DNS records for a domain in the database by its ID. */
@@ -26,5 +26,27 @@ export const dnsApi = {
   /** Check drift between DNS provider (expected) and live DNS (actual). */
   driftCheck(domainId: number): Promise<ApiResponse<DriftResult>> {
     return http.get(`/domains/${domainId}/dns-drift`)
+  },
+
+  // ── Provider record CRUD ──────────────────────────────────────────────────
+
+  /** List DNS records from the provider API. */
+  listProviderRecords(domainId: number, type?: string): Promise<ApiResponse<{ items: ProviderRecord[]; total: number }>> {
+    return http.get(`/domains/${domainId}/provider-records`, { params: type ? { type } : {} })
+  },
+
+  /** Create a DNS record via the provider API. */
+  createProviderRecord(domainId: number, data: CreateProviderRecordRequest): Promise<ApiResponse<ProviderRecord>> {
+    return http.post(`/domains/${domainId}/provider-records`, data)
+  },
+
+  /** Update a DNS record via the provider API. */
+  updateProviderRecord(domainId: number, recordId: string, data: UpdateProviderRecordRequest): Promise<ApiResponse<ProviderRecord>> {
+    return http.put(`/domains/${domainId}/provider-records/${recordId}`, data)
+  },
+
+  /** Delete a DNS record via the provider API. */
+  deleteProviderRecord(domainId: number, recordId: string): Promise<ApiResponse<null>> {
+    return http.delete(`/domains/${domainId}/provider-records/${recordId}`)
   },
 }
