@@ -1,18 +1,23 @@
 <script setup lang="ts">
-import { onMounted, ref, computed } from 'vue'
+import { onMounted, ref, computed, h } from 'vue'
 import { useRoute } from 'vue-router'
+import type { DataTableColumns } from 'naive-ui'
+import type { VNodeChild } from 'vue'
 import {
   NTabs, NTabPane, NDescriptions, NDescriptionsItem,
   NTimeline, NTimelineItem, NButton, NSpace, NModal, NForm,
   NFormItem, NInput, NInputNumber, NSelect, NSwitch, NDatePicker,
+  NDataTable, NTag, NPopconfirm,
   useMessage,
 } from 'naive-ui'
 import { PageHeader, StatusTag, ConfirmModal, PageHint } from '@/components'
 import { useDomainStore } from '@/stores/domain'
 import { useRegistrarStore } from '@/stores/registrar'
 import { useDNSProviderStore } from '@/stores/dnsprovider'
+import { useSSLStore } from '@/stores/ssl'
 import { domainApi } from '@/api/domain'
 import type { DomainLifecycleHistoryEntry, UpdateDomainAssetRequest } from '@/types/domain'
+import type { SSLCertResponse } from '@/types/ssl'
 import type { DomainLifecycleState, ApiResponse } from '@/types/common'
 import type { SelectOption } from 'naive-ui'
 
@@ -20,6 +25,7 @@ const route    = useRoute()
 const store    = useDomainStore()
 const regStore = useRegistrarStore()
 const dnsStore = useDNSProviderStore()
+const sslStore = useSSLStore()
 const message  = useMessage()
 
 // domain ID from route (numeric)
@@ -226,6 +232,95 @@ async function doCancelTransfer() {
   }
 }
 
+// ── SSL ───────────────────────────────────────────────────────────────────────
+const showSSLCreate = ref(false)
+const sslCreating   = ref(false)
+const sslChecking   = ref(false)
+const sslForm       = ref({ expires_at: '', issuer: '', cert_type: '', serial_number: '', notes: '' })
+
+const sslStatusType = (status: string) => {
+  if (status === 'active')   return 'success'
+  if (status === 'expiring') return 'warning'
+  if (status === 'expired')  return 'error'
+  return 'default'
+}
+
+const sslColumns: DataTableColumns<SSLCertResponse> = [
+  { title: '到期日', key: 'expires_at', width: 120 },
+  { title: '剩餘天數', key: 'days_left', width: 90,
+    render: (row): VNodeChild => {
+      const color = row.days_left <= 0 ? 'var(--error)' : row.days_left <= 30 ? 'var(--warning)' : undefined
+      return h('span', { style: color ? `color: ${color}` : '' }, String(row.days_left))
+    },
+  },
+  { title: '狀態', key: 'status', width: 100,
+    render: (row): VNodeChild => h(NTag, { type: sslStatusType(row.status), size: 'small', bordered: false }, { default: () => row.status }),
+  },
+  { title: '簽發機構', key: 'issuer', ellipsis: { tooltip: true } },
+  { title: 'Serial', key: 'serial_number', ellipsis: { tooltip: true } },
+  { title: '最後檢查', key: 'last_check_at', width: 170,
+    render: (row): VNodeChild => row.last_check_at ? new Date(row.last_check_at).toLocaleString('zh-TW') : '-',
+  },
+  {
+    title: '操作', key: 'actions', width: 80, fixed: 'right',
+    render: (row): VNodeChild => h(NPopconfirm,
+      { onPositiveClick: () => handleSSLDelete(row.id) },
+      {
+        trigger: () => h(NButton, { size: 'small', type: 'error', quaternary: true }, { default: () => '刪除' }),
+        default: () => '確認刪除此憑證記錄？',
+      }
+    ),
+  },
+]
+
+async function handleSSLCheck() {
+  const fqdn = store.current?.fqdn
+  if (!fqdn) return
+  sslChecking.value = true
+  try {
+    await sslStore.check(domainId, fqdn)
+    message.success('SSL 檢查完成')
+  } catch (e: any) {
+    message.error(e?.response?.data?.message || 'SSL 檢查失敗')
+  } finally {
+    sslChecking.value = false
+  }
+}
+
+async function handleSSLCreate() {
+  if (!sslForm.value.expires_at) {
+    message.warning('請填寫到期日')
+    return
+  }
+  sslCreating.value = true
+  try {
+    await sslStore.create(domainId, {
+      expires_at:    sslForm.value.expires_at,
+      issuer:        sslForm.value.issuer || null,
+      cert_type:     sslForm.value.cert_type || null,
+      serial_number: sslForm.value.serial_number || null,
+      notes:         sslForm.value.notes || null,
+    })
+    message.success('憑證已新增')
+    showSSLCreate.value = false
+    sslForm.value = { expires_at: '', issuer: '', cert_type: '', serial_number: '', notes: '' }
+    await sslStore.fetchList(domainId)
+  } catch (e: any) {
+    message.error(e?.response?.data?.message || '新增失敗')
+  } finally {
+    sslCreating.value = false
+  }
+}
+
+async function handleSSLDelete(id: number) {
+  try {
+    await sslStore.deleteCert(id)
+    message.success('已刪除')
+  } catch (e: any) {
+    message.error(e?.response?.data?.message || '刪除失敗')
+  }
+}
+
 // ── Helper ────────────────────────────────────────────────────────────────────
 function fmtDate(s: string | null | undefined): string {
   return s ? new Date(s).toLocaleDateString('zh-TW') : '-'
@@ -234,7 +329,7 @@ function fmtDate(s: string | null | undefined): string {
 onMounted(async () => {
   await store.fetchOne(domainId)
   await refreshHistory()
-  await Promise.all([regStore.fetchList(), dnsStore.fetchList()])
+  await Promise.all([regStore.fetchList(), dnsStore.fetchList(), sslStore.fetchList(domainId)])
 })
 </script>
 
@@ -383,6 +478,25 @@ onMounted(async () => {
             </div>
           </NTabPane>
 
+          <!-- SSL tab -->
+          <NTabPane name="ssl" :tab="`SSL 憑證 (${sslStore.certs.length})`">
+            <div class="tab-section">
+              <div style="display:flex; gap:8px; margin-bottom: 12px;">
+                <NButton type="primary" size="small" @click="showSSLCreate = true">手動新增</NButton>
+                <NButton size="small" :loading="sslChecking" @click="handleSSLCheck">立即檢查</NButton>
+              </div>
+              <NDataTable
+                :columns="sslColumns"
+                :data="sslStore.certs"
+                :loading="sslStore.loading"
+                :row-key="(r: SSLCertResponse) => r.id"
+                size="small"
+                :max-height="320"
+                scroll-x="700"
+              />
+            </div>
+          </NTabPane>
+
           <!-- History tab -->
           <NTabPane name="history" :tab="`狀態歷史 (${history.length})`">
             <NTimeline class="history-timeline">
@@ -503,6 +617,48 @@ onMounted(async () => {
         <NSpace justify="end">
           <NButton @click="showEdit = false">取消</NButton>
           <NButton type="primary" :loading="saving" @click="submitEdit">儲存</NButton>
+        </NSpace>
+      </template>
+    </NModal>
+
+    <!-- SSL create modal -->
+    <NModal
+      v-model:show="showSSLCreate"
+      preset="card"
+      title="手動新增 SSL 憑證記錄"
+      style="width: 480px"
+      :mask-closable="false"
+    >
+      <NForm label-placement="left" label-width="110px">
+        <NFormItem label="到期日" required>
+          <NInput
+            v-model:value="sslForm.expires_at"
+            placeholder="YYYY-MM-DD"
+            clearable
+          />
+        </NFormItem>
+        <NFormItem label="簽發機構">
+          <NInput v-model:value="sslForm.issuer" placeholder="例：Let's Encrypt" clearable />
+        </NFormItem>
+        <NFormItem label="憑證類型">
+          <NSelect
+            v-model:value="(sslForm as any).cert_type"
+            :options="[{label:'DV',value:'dv'},{label:'OV',value:'ov'},{label:'EV',value:'ev'}]"
+            clearable
+            placeholder="選填"
+          />
+        </NFormItem>
+        <NFormItem label="Serial Number">
+          <NInput v-model:value="sslForm.serial_number" placeholder="選填" clearable />
+        </NFormItem>
+        <NFormItem label="備注">
+          <NInput v-model:value="sslForm.notes" type="textarea" :rows="2" clearable />
+        </NFormItem>
+      </NForm>
+      <template #footer>
+        <NSpace justify="end">
+          <NButton @click="showSSLCreate = false">取消</NButton>
+          <NButton type="primary" :loading="sslCreating" @click="handleSSLCreate">新增</NButton>
         </NSpace>
       </template>
     </NModal>

@@ -20,6 +20,7 @@ type Deps struct {
 	HostGroupHandler   *handler.HostGroupHandler
 	RegistrarHandler   *handler.RegistrarHandler
 	DNSProviderHandler *handler.DNSProviderHandler
+	SSLHandler         *handler.SSLHandler
 	JWTManager         *auth.JWTManager
 }
 
@@ -149,6 +150,18 @@ func RegisterV1(r *gin.Engine, deps Deps) {
 			registrarAccounts.PUT("/:id", middleware.RequireAnyRole("admin"), deps.RegistrarHandler.UpdateAccount)
 			registrarAccounts.DELETE("/:id", middleware.RequireAnyRole("admin"), deps.RegistrarHandler.DeleteAccount)
 		}
+
+		// ── SSL Certificates ──────────────────────────────────────────
+		// NOTE: static path /expiring must be before /:id.
+		sslCerts := authed.Group("/ssl-certs")
+		{
+			sslCerts.GET("/expiring", middleware.RequireAnyRole("viewer", "operator", "release_manager", "admin", "auditor"), deps.SSLHandler.ListExpiring)
+			sslCerts.DELETE("/:id", middleware.RequireAnyRole("operator", "release_manager", "admin"), deps.SSLHandler.Delete)
+		}
+		// SSL sub-routes nested under domains
+		domains.POST("/:id/ssl-certs", middleware.RequireAnyRole("operator", "release_manager", "admin"), deps.SSLHandler.Create)
+		domains.GET("/:id/ssl-certs", middleware.RequireAnyRole("viewer", "operator", "release_manager", "admin", "auditor"), deps.SSLHandler.List)
+		domains.POST("/:id/ssl-certs/check", middleware.RequireAnyRole("operator", "release_manager", "admin"), deps.SSLHandler.Check)
 
 		// ── DNS Providers ─────────────────────────────────────────────
 		dnsProviders := authed.Group("/dns-providers")

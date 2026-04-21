@@ -14,6 +14,7 @@ import (
 	"domain-platform/internal/artifact"
 	"domain-platform/internal/bootstrap"
 	"domain-platform/internal/release"
+	sslsvc "domain-platform/internal/ssl"
 	"domain-platform/internal/tasks"
 	pkgstorage "domain-platform/pkg/storage"
 	"domain-platform/store/postgres"
@@ -53,6 +54,10 @@ func main() {
 	// ── Build real task handlers ───────────────────────────────────────────
 	artifactStore := postgres.NewArtifactStore(db)
 	domainStore := postgres.NewDomainStore(db)
+	sslCertStore := postgres.NewSSLCertificateStore(db)
+	sslService := sslsvc.NewService(sslCertStore, domainStore, logger)
+	sslCheckHandler := sslsvc.NewHandleCheckExpiry(sslService, logger)
+	sslCheckAllHandler := sslsvc.NewHandleCheckAllActive(sslService, logger)
 	templateStore := postgres.NewTemplateStore(db)
 	agentStore := postgres.NewAgentStore(db)
 	releaseStore := postgres.NewReleaseStore(db)
@@ -93,6 +98,8 @@ func main() {
 
 	// ── Real handlers ──────────────────────────────────────────────────────
 	mux.Handle(tasks.TypeArtifactBuild, artifactBuildHandler)
+	mux.Handle(tasks.TypeSSLCheckExpiry, sslCheckHandler)
+	mux.Handle(tasks.TypeSSLCheckAllActive, sslCheckAllHandler)
 
 	// ── Stub handlers (log payload, return nil) ───────────────────────────
 	// These will be replaced by real implementations in P2+.

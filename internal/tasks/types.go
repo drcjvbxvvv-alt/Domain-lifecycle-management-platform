@@ -27,6 +27,10 @@ const (
 	TypeProbeRunL2 = "probe:run_l2"
 	TypeProbeRunL3 = "probe:run_l3"
 
+	// SSL certificate checking
+	TypeSSLCheckExpiry    = "ssl:check_expiry"     // single domain TLS probe + upsert
+	TypeSSLCheckAllActive = "ssl:check_all_active" // batch: enqueue TypeSSLCheckExpiry per active domain
+
 	// Notify
 	TypeNotifySend = "notify:send"
 )

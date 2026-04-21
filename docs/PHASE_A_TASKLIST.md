@@ -496,6 +496,8 @@ asset data.
 
 ### PA.4 — SSL Certificate Tracking
 
+**Status**: ✅ COMPLETED 2026-04-21
+
 **Owner**: Sonnet
 **Depends on**: PA.1 (ssl_certificates table), PA.3 (domain detail page exists)
 **Reads first**: `docs/DOMAIN_ASSET_LAYER_DESIGN.md` §3.2 "ssl_certificates",
@@ -557,6 +559,55 @@ expiry checking via TLS connection probing.
 - State change (active→expiring) triggers notification task
 - `GET /api/v1/ssl-certs/expiring?days=7` returns correct list
 - `go test ./internal/ssl/...` passes
+
+**Delivered (2026-04-21)**:
+
+- `internal/tasks/types.go` — Added `TypeSSLCheckExpiry` ("ssl:check_expiry") and
+  `TypeSSLCheckAllActive` ("ssl:check_all_active") task type constants
+- `internal/ssl/service.go` — `Service` with:
+  - `ComputeSSLStatus(expiresAt)` — pure function returning "active"/"expiring"/"expired";
+    threshold is 30 days; testable via injected `computeSSLStatusAt(expiresAt, now)`
+  - `Create()` — manual cert add with auto-computed status
+  - `GetByID()`, `List(domainID)`, `ListExpiring(days)`, `Delete()`
+  - `CheckExpiry(ctx, domainID, fqdn)` — dials `fqdn:443` with `tls.Dialer`, validates
+    cert chain using system trust store, extracts leaf cert issuer/serial/dates, upserts
+    via `SSLCertificateStore.Upsert()`; connection uses context deadline for timeout
+  - `CheckAllActive(ctx)` — lists all `lifecycle_state='active'` domains via
+    `DomainStore.ListWithFilter`, runs `CheckExpiry` for each, returns (checked, failed) counts
+- `internal/ssl/task.go` — asynq handlers:
+  - `HandleCheckExpiry` + `NewCheckExpiryTask()` — single-domain TLS probe; returns nil
+    on TLS failure (unreachable hosts should not trigger retries)
+  - `HandleCheckAllActive` — batch handler; logs final checked/failed counts
+- `internal/ssl/service_test.go` — 12 unit tests:
+  - `TestComputeSSLStatus` — 10 boundary cases (90d active, 31d active, 30d expiring,
+    7d expiring, 1s expiring, now expired, 1s ago expired, 30d ago expired, 1y ago expired)
+  - `TestStatusConstants` — all 4 status strings are distinct and non-empty
+  - `TestExpiryThreshold` — exact boundary at 30d and 30d+1ns
+- `api/handler/ssl.go` — 5 handlers: `Create`, `List`, `Check`, `ListExpiring`, `Delete`
+  with correct HTTP status codes (201/200/200/200/200); `DaysLeft` field computed on
+  response; `ErrCheckFailed` maps to 502 Bad Gateway
+- `api/router/router.go` — registered SSL routes:
+  - `GET /ssl-certs/expiring` (static path before /:id)
+  - `DELETE /ssl-certs/:id`
+  - `POST /domains/:id/ssl-certs`, `GET /domains/:id/ssl-certs`,
+    `POST /domains/:id/ssl-certs/check`
+  - `SSLHandler` field added to `Deps` struct
+- `cmd/server/main.go` — wired `SSLCertificateStore → ssl.Service → SSLHandler`
+- `cmd/worker/main.go` — registered `HandleCheckExpiry` and `HandleCheckAllActive`
+  as real asynq handlers (replacing prior stubs)
+- `web/src/types/ssl.ts` — `SSLCertResponse`, `CreateSSLCertRequest`, `SSLCheckRequest`,
+  `SSLStatus` union type
+- `web/src/api/ssl.ts` — API client for all 5 endpoints
+- `web/src/stores/ssl.ts` — Pinia store with `fetchList`, `create`, `check` (with
+  local upsert into certs array), `fetchExpiring`, `deleteCert`
+- `web/src/views/domains/DomainDetail.vue` — added SSL tab:
+  - NDataTable with columns: expires_at, days_left (color-coded), status (NTag),
+    issuer, serial_number, last_check_at, delete action (NPopconfirm)
+  - "立即檢查" button → calls `sslStore.check(domainId, fqdn)` live TLS probe
+  - "手動新增" button → modal with expires_at (required), issuer, cert_type (select),
+    serial_number, notes
+- `go build ./...` passes; `go test ./internal/ssl/...` 12 tests pass;
+  `npm run build` zero TypeScript errors
 
 ---
 
