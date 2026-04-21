@@ -47,7 +47,7 @@ onMounted(fetchData)
     <PageHeader title="到期總覽" subtitle="域名與 SSL 憑證到期狀態">
       <template #hint>
         <PageHint storage-key="expiry-dashboard" title="到期總覽說明">
-          系統每日自動檢查域名到期日，依剩餘天數分為五���等級。<br>
+          系統每日自動檢查域名到期日，依剩餘天數分為五個等級。<br>
           點擊各卡片可快速跳轉至對應域名列表。
         </PageHint>
       </template>

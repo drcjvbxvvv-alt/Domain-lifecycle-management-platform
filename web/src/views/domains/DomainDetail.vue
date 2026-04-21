@@ -339,7 +339,7 @@ async function handleTagChange(ids: number[]) {
   }
 }
 
-// ── Cost ────────────────���─────────────────────────────────────────────────────
+// ── Cost ─────────────────────────────────────────────────────────────────────
 const showCostCreate = ref(false)
 const costCreating   = ref(false)
 const costForm       = ref<{ cost_type: CostType; amount: number; currency: string; paid_at: string; notes: string }>({
@@ -474,12 +474,12 @@ onMounted(async () => {
           <NDescriptionsItem label="到期日">{{ fmtDate(store.current.expiry_date) }}</NDescriptionsItem>
           <NDescriptionsItem label="自動續約">{{ store.current.auto_renew ? '是' : '否' }}</NDescriptionsItem>
           <NDescriptionsItem label="到期狀態">{{ store.current.expiry_status ?? '-' }}</NDescriptionsItem>
-          <NDescriptionsItem label="建���時間">
+          <NDescriptionsItem label="建立時間">
             {{ new Date(store.current.created_at).toLocaleString('zh-TW') }}
           </NDescriptionsItem>
         </NDescriptions>
 
-        <div class="section-title" style="margin-top:16px">標��</div>
+        <div class="section-title" style="margin-top:16px">標籤</div>
         <NSelect
           :value="domainTagIds"
           :options="allTagOptions"
