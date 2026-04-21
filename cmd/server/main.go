@@ -133,7 +133,7 @@ func main() {
 	importSvc := importsvc.NewService(importJobStore, domainStore, lifecycleSvc, asynqClient, logger)
 	importHandler := handler.NewImportHandler(importSvc, logger)
 
-	dnsQuerySvc := dnsquery.NewService(logger)
+	dnsQuerySvc := dnsquery.NewService("", logger) // "" = auto-detect system resolver
 	dnsQueryHandler := handler.NewDNSQueryHandler(dnsQuerySvc, lifecycleSvc, logger)
 
 	// ── Management API listener (:8080, JWT auth) ──────────────────────────

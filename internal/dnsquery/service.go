@@ -1,20 +1,28 @@
-// Package dnsquery provides live DNS record lookups using the system resolver.
-// It queries public DNS for A, AAAA, CNAME, MX, TXT, NS records and returns
-// a unified result. This is a read-only, credential-free approach — suitable
-// for "what does this domain resolve to right now?" queries.
+// Package dnsquery provides live DNS record lookups using miekg/dns.
+//
+// It queries DNS resolvers at the raw protocol level, returning full record
+// details including TTL. Supports A, AAAA, CNAME, MX, TXT, NS, SOA, SRV,
+// CAA, and PTR record types. The caller can specify a custom nameserver
+// (e.g. "8.8.8.8:53") or leave it empty to use system default.
+//
+// This is a credential-free, read-only lookup — it does not use any DNS
+// Provider API. Suitable for answering "what does this domain actually
+// resolve to right now?".
 package dnsquery
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"sort"
 	"strings"
 	"time"
 
+	"github.com/miekg/dns"
 	"go.uber.org/zap"
 )
 
-// RecordType enumerates the DNS record types we query.
+// RecordType enumerates supported DNS record types.
 type RecordType string
 
 const (
@@ -24,145 +32,219 @@ const (
 	TypeMX    RecordType = "MX"
 	TypeTXT   RecordType = "TXT"
 	TypeNS    RecordType = "NS"
+	TypeSOA   RecordType = "SOA"
+	TypeSRV   RecordType = "SRV"
+	TypeCAA   RecordType = "CAA"
+	TypePTR   RecordType = "PTR"
 )
 
-// Record represents a single DNS record returned by a lookup.
+// typeOrder defines the display order for record types.
+var typeOrder = map[RecordType]int{
+	TypeA: 0, TypeAAAA: 1, TypeCNAME: 2, TypeMX: 3,
+	TypeNS: 4, TypeSOA: 5, TypeSRV: 6, TypeCAA: 7,
+	TypeTXT: 8, TypePTR: 9,
+}
+
+// Record represents a single DNS record.
 type Record struct {
 	Type     RecordType `json:"type"`
 	Name     string     `json:"name"`
 	Value    string     `json:"value"`
-	Priority int        `json:"priority,omitempty"` // MX only
-	TTL      int        `json:"ttl,omitempty"`      // not available from net pkg, kept for future
+	TTL      uint32     `json:"ttl"`
+	Priority int        `json:"priority,omitempty"` // MX / SRV
 }
 
 // LookupResult is the full DNS lookup response for one FQDN.
 type LookupResult struct {
-	FQDN      string   `json:"fqdn"`
-	Records   []Record `json:"records"`
-	QueriedAt string   `json:"queried_at"` // ISO 8601
-	Error     string   `json:"error,omitempty"`
+	FQDN       string   `json:"fqdn"`
+	Nameserver string   `json:"nameserver"`          // resolver used
+	Records    []Record `json:"records"`
+	QueriedAt  string   `json:"queried_at"`           // ISO 8601
+	ElapsedMs  int64    `json:"elapsed_ms"`           // total query time
+	Error      string   `json:"error,omitempty"`
 }
 
-// Service performs DNS lookups.
+// defaultQueryTypes lists the record types queried by Lookup().
+var defaultQueryTypes = []uint16{
+	dns.TypeA,
+	dns.TypeAAAA,
+	dns.TypeCNAME,
+	dns.TypeMX,
+	dns.TypeNS,
+	dns.TypeSOA,
+	dns.TypeSRV,
+	dns.TypeCAA,
+	dns.TypeTXT,
+}
+
+// Service performs DNS lookups via miekg/dns.
 type Service struct {
-	resolver *net.Resolver
-	logger   *zap.Logger
+	nameserver string // e.g. "8.8.8.8:53"; empty = system default
+	logger     *zap.Logger
 }
 
-// NewService returns a DNS query service using the given resolver.
-// Pass nil to use the default system resolver.
-func NewService(logger *zap.Logger) *Service {
+// NewService creates a DNS query service.
+// nameserver is the DNS resolver address (e.g. "8.8.8.8:53").
+// Pass "" to auto-detect the system resolver.
+func NewService(nameserver string, logger *zap.Logger) *Service {
+	if nameserver == "" {
+		nameserver = detectSystemResolver()
+	}
+	// Ensure port is present
+	if _, _, err := net.SplitHostPort(nameserver); err != nil {
+		nameserver = net.JoinHostPort(nameserver, "53")
+	}
 	return &Service{
-		resolver: net.DefaultResolver,
-		logger:   logger,
+		nameserver: nameserver,
+		logger:     logger,
 	}
 }
 
-// Lookup queries all supported record types for the given FQDN and returns
-// the aggregated result. Individual record type failures are logged but do
-// not cause the overall lookup to fail — the result simply omits that type.
+// Nameserver returns the resolver address this service uses.
+func (s *Service) Nameserver() string {
+	return s.nameserver
+}
+
+// Lookup queries all supported record types for the given FQDN.
+// Individual query failures are logged at debug level but do not
+// cause the overall lookup to fail.
 func (s *Service) Lookup(ctx context.Context, fqdn string) *LookupResult {
 	fqdn = strings.TrimSuffix(strings.TrimSpace(fqdn), ".")
 	if fqdn == "" {
 		return &LookupResult{FQDN: fqdn, Error: "empty FQDN", QueriedAt: now()}
 	}
 
-	// Use a short timeout per query type so the whole lookup stays snappy.
-	qctx, cancel := context.WithTimeout(ctx, 10*time.Second)
-	defer cancel()
-
+	start := time.Now()
 	result := &LookupResult{
-		FQDN:      fqdn,
-		QueriedAt: now(),
+		FQDN:       fqdn,
+		Nameserver: s.nameserver,
+		QueriedAt:  now(),
 	}
 
-	// ── A + AAAA ──────────────────────────────────────────────────────────
-	ips, err := s.resolver.LookupIPAddr(qctx, fqdn)
-	if err != nil {
-		s.logQueryErr(fqdn, "A/AAAA", err)
-	}
-	for _, ip := range ips {
-		rtype := TypeA
-		if ip.IP.To4() == nil {
-			rtype = TypeAAAA
+	// FQDN must end with a dot for miekg/dns
+	qname := dns.Fqdn(fqdn)
+
+	c := new(dns.Client)
+	c.Timeout = 5 * time.Second
+
+	for _, qtype := range defaultQueryTypes {
+		if ctx.Err() != nil {
+			break
 		}
-		result.Records = append(result.Records, Record{
-			Type:  rtype,
-			Name:  fqdn,
-			Value: ip.IP.String(),
-		})
-	}
 
-	// ── CNAME ─────────────────────────────────────────────────────────────
-	cname, err := s.resolver.LookupCNAME(qctx, fqdn)
-	if err == nil && cname != "" {
-		canonical := strings.TrimSuffix(cname, ".")
-		// Only include if it differs from the queried name (not self-referencing)
-		if !strings.EqualFold(canonical, fqdn) {
-			result.Records = append(result.Records, Record{
-				Type:  TypeCNAME,
-				Name:  fqdn,
-				Value: canonical,
-			})
+		msg := new(dns.Msg)
+		msg.SetQuestion(qname, qtype)
+		msg.RecursionDesired = true
+
+		resp, _, err := c.ExchangeContext(ctx, msg, s.nameserver)
+		if err != nil {
+			s.logQueryErr(fqdn, dns.TypeToString[qtype], err)
+			continue
+		}
+		if resp == nil {
+			continue
+		}
+		// Retry with TCP if response was truncated (common for TXT records)
+		if resp.Truncated {
+			tcpClient := new(dns.Client)
+			tcpClient.Net = "tcp"
+			tcpClient.Timeout = 5 * time.Second
+			tcpResp, _, tcpErr := tcpClient.ExchangeContext(ctx, msg, s.nameserver)
+			if tcpErr == nil && tcpResp != nil {
+				resp = tcpResp
+			}
+		}
+		if resp.Rcode != dns.RcodeSuccess && resp.Rcode != dns.RcodeNameError {
+			s.logger.Debug("dns non-success rcode",
+				zap.String("fqdn", fqdn),
+				zap.String("type", dns.TypeToString[qtype]),
+				zap.String("rcode", dns.RcodeToString[resp.Rcode]),
+			)
+			continue
+		}
+
+		for _, rr := range resp.Answer {
+			rec := parseRR(rr)
+			if rec != nil {
+				result.Records = append(result.Records, *rec)
+			}
 		}
 	}
 
-	// ── MX ────────────────────────────────────────────────────────────────
-	mxs, err := s.resolver.LookupMX(qctx, fqdn)
-	if err != nil {
-		s.logQueryErr(fqdn, "MX", err)
-	}
-	for _, mx := range mxs {
-		result.Records = append(result.Records, Record{
-			Type:     TypeMX,
-			Name:     fqdn,
-			Value:    strings.TrimSuffix(mx.Host, "."),
-			Priority: int(mx.Pref),
-		})
-	}
+	// Deduplicate (multiple query types can return the same CNAME chain)
+	result.Records = dedup(result.Records)
 
-	// ── TXT ───────────────────────────────────────────────────────────────
-	txts, err := s.resolver.LookupTXT(qctx, fqdn)
-	if err != nil {
-		s.logQueryErr(fqdn, "TXT", err)
-	}
-	for _, txt := range txts {
-		result.Records = append(result.Records, Record{
-			Type:  TypeTXT,
-			Name:  fqdn,
-			Value: txt,
-		})
-	}
-
-	// ── NS ────────────────────────────────────────────────────────────────
-	nss, err := s.resolver.LookupNS(qctx, fqdn)
-	if err != nil {
-		s.logQueryErr(fqdn, "NS", err)
-	}
-	for _, ns := range nss {
-		result.Records = append(result.Records, Record{
-			Type:  TypeNS,
-			Name:  fqdn,
-			Value: strings.TrimSuffix(ns.Host, "."),
-		})
-	}
-
-	// Sort: type order (A, AAAA, CNAME, MX, NS, TXT) then value
-	typeOrder := map[RecordType]int{TypeA: 0, TypeAAAA: 1, TypeCNAME: 2, TypeMX: 3, TypeNS: 4, TypeTXT: 5}
+	// Sort by type order, then value
 	sort.Slice(result.Records, func(i, j int) bool {
-		if result.Records[i].Type != result.Records[j].Type {
-			return typeOrder[result.Records[i].Type] < typeOrder[result.Records[j].Type]
+		oi, oj := typeOrder[result.Records[i].Type], typeOrder[result.Records[j].Type]
+		if oi != oj {
+			return oi < oj
 		}
 		return result.Records[i].Value < result.Records[j].Value
 	})
 
+	result.ElapsedMs = time.Since(start).Milliseconds()
 	return result
 }
 
+// parseRR converts a miekg/dns RR into our Record type.
+// Returns nil for unsupported RR types.
+func parseRR(rr dns.RR) *Record {
+	hdr := rr.Header()
+	name := strings.TrimSuffix(hdr.Name, ".")
+
+	switch v := rr.(type) {
+	case *dns.A:
+		return &Record{Type: TypeA, Name: name, Value: v.A.String(), TTL: hdr.Ttl}
+	case *dns.AAAA:
+		return &Record{Type: TypeAAAA, Name: name, Value: v.AAAA.String(), TTL: hdr.Ttl}
+	case *dns.CNAME:
+		return &Record{Type: TypeCNAME, Name: name, Value: strings.TrimSuffix(v.Target, "."), TTL: hdr.Ttl}
+	case *dns.MX:
+		return &Record{Type: TypeMX, Name: name, Value: strings.TrimSuffix(v.Mx, "."), TTL: hdr.Ttl, Priority: int(v.Preference)}
+	case *dns.NS:
+		return &Record{Type: TypeNS, Name: name, Value: strings.TrimSuffix(v.Ns, "."), TTL: hdr.Ttl}
+	case *dns.SOA:
+		val := fmt.Sprintf("%s %s %d %d %d %d %d",
+			strings.TrimSuffix(v.Ns, "."),
+			strings.TrimSuffix(v.Mbox, "."),
+			v.Serial, v.Refresh, v.Retry, v.Expire, v.Minttl,
+		)
+		return &Record{Type: TypeSOA, Name: name, Value: val, TTL: hdr.Ttl}
+	case *dns.SRV:
+		val := fmt.Sprintf("%s:%d (weight=%d)", strings.TrimSuffix(v.Target, "."), v.Port, v.Weight)
+		return &Record{Type: TypeSRV, Name: name, Value: val, TTL: hdr.Ttl, Priority: int(v.Priority)}
+	case *dns.CAA:
+		val := fmt.Sprintf("%d %s \"%s\"", v.Flag, v.Tag, v.Value)
+		return &Record{Type: TypeCAA, Name: name, Value: val, TTL: hdr.Ttl}
+	case *dns.TXT:
+		return &Record{Type: TypeTXT, Name: name, Value: strings.Join(v.Txt, ""), TTL: hdr.Ttl}
+	case *dns.PTR:
+		return &Record{Type: TypePTR, Name: name, Value: strings.TrimSuffix(v.Ptr, "."), TTL: hdr.Ttl}
+	default:
+		return nil
+	}
+}
+
+// dedup removes duplicate records (same type + value).
+func dedup(records []Record) []Record {
+	seen := make(map[string]struct{}, len(records))
+	out := make([]Record, 0, len(records))
+	for _, r := range records {
+		key := string(r.Type) + "|" + r.Value
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, r)
+	}
+	return out
+}
+
 func (s *Service) logQueryErr(fqdn string, qtype string, err error) {
-	// DNS "no such host" is normal for missing record types — debug only
-	if dnsErr, ok := err.(*net.DNSError); ok && dnsErr.IsNotFound {
-		s.logger.Debug("dns record not found",
+	// Timeouts and "no such host" are normal for certain types — debug only
+	if isExpectedDNSErr(err) {
+		s.logger.Debug("dns query not resolved",
 			zap.String("fqdn", fqdn),
 			zap.String("type", qtype),
 		)
@@ -175,12 +257,31 @@ func (s *Service) logQueryErr(fqdn string, qtype string, err error) {
 	)
 }
 
+func isExpectedDNSErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "no such host") ||
+		strings.Contains(msg, "i/o timeout") ||
+		strings.Contains(msg, "NXDOMAIN")
+}
+
 func now() string {
 	return time.Now().UTC().Format(time.RFC3339)
 }
 
+// detectSystemResolver tries to find the system's DNS resolver.
+// Falls back to 8.8.8.8:53 if detection fails.
+func detectSystemResolver() string {
+	config, err := dns.ClientConfigFromFile("/etc/resolv.conf")
+	if err == nil && len(config.Servers) > 0 {
+		return net.JoinHostPort(config.Servers[0], config.Port)
+	}
+	return "8.8.8.8:53"
+}
+
 // LookupMultiple queries DNS for multiple FQDNs concurrently (up to 20).
-// Useful for batch views like the domain list table.
 func (s *Service) LookupMultiple(ctx context.Context, fqdns []string) []LookupResult {
 	const maxConcurrency = 20
 	if len(fqdns) > maxConcurrency {

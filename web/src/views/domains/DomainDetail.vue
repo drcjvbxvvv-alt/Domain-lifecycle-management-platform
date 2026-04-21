@@ -346,12 +346,9 @@ const dnsLoading   = ref(false)
 const dnsResult    = ref<DNSLookupResult | null>(null)
 
 const dnsRecordTypeColor: Record<string, string> = {
-  A:     'success',
-  AAAA:  'info',
-  CNAME: 'warning',
-  MX:    'default',
-  TXT:   'default',
-  NS:    'info',
+  A: 'success', AAAA: 'info', CNAME: 'warning', MX: 'default',
+  TXT: 'default', NS: 'info', SOA: 'default', SRV: 'default',
+  CAA: 'warning', PTR: 'default',
 }
 
 const dnsColumns: DataTableColumns<DNSRecord> = [
@@ -361,11 +358,14 @@ const dnsColumns: DataTableColumns<DNSRecord> = [
   { title: '值', key: 'value', ellipsis: { tooltip: true },
     render: (row): VNodeChild => {
       const parts = [row.value]
-      if (row.type === 'MX' && row.priority !== undefined) {
+      if ((row.type === 'MX' || row.type === 'SRV') && row.priority !== undefined) {
         parts.unshift(`[${row.priority}]`)
       }
       return h('code', { style: 'font-size:12px; word-break:break-all' }, parts.join(' '))
     },
+  },
+  { title: 'TTL', key: 'ttl', width: 80,
+    render: (row): VNodeChild => h('span', { style: 'font-family:var(--font-mono); font-size:12px' }, `${row.ttl}s`),
   },
 ]
 
@@ -637,12 +637,14 @@ onMounted(async () => {
           <!-- DNS Records tab -->
           <NTabPane name="dns" :tab="`DNS 查詢 (${dnsResult?.records?.length ?? '-'})`">
             <div class="tab-section">
-              <div style="display:flex; gap:8px; margin-bottom: 12px; align-items:center;">
+              <div style="display:flex; gap:8px; margin-bottom: 12px; align-items:center; flex-wrap:wrap;">
                 <NButton type="primary" size="small" :loading="dnsLoading" @click="handleDNSLookup">
                   {{ dnsResult ? '重新查詢' : '查詢 DNS 記錄' }}
                 </NButton>
-                <span v-if="dnsResult" style="font-size:12px; color:var(--text-muted)">
-                  查詢時間：{{ new Date(dnsResult.queried_at).toLocaleString('zh-TW') }}
+                <span v-if="dnsResult" class="dns-meta">
+                  解析器：<code>{{ dnsResult.nameserver }}</code>
+                  ・耗時 {{ dnsResult.elapsed_ms }}ms
+                  ・{{ new Date(dnsResult.queried_at).toLocaleString('zh-TW') }}
                 </span>
               </div>
 
@@ -974,5 +976,15 @@ onMounted(async () => {
   display: flex;
   gap: 8px;
   margin-top: 16px;
+}
+.dns-meta {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+.dns-meta code {
+  font-family: var(--font-mono);
+  background: var(--bg-hover);
+  padding: 1px 4px;
+  border-radius: 3px;
 }
 </style>
