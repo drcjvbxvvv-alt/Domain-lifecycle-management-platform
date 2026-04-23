@@ -11,6 +11,7 @@ import (
 	"github.com/hibiken/asynq"
 	"go.uber.org/zap"
 
+	alertsvc "domain-platform/internal/alert"
 	"domain-platform/internal/artifact"
 	"domain-platform/internal/bootstrap"
 	domainsvc "domain-platform/internal/domain"
@@ -96,6 +97,12 @@ func main() {
 	asynqClient := bootstrap.NewAsynqClient(cfg.Redis)
 	defer asynqClient.Close()
 
+	// ── Alert engine (PC.2) ───────────────────────────────────────────────
+	alertStore := postgres.NewAlertStore(db)
+	alertEngine := alertsvc.NewEngine(alertStore, asynqClient, logger)
+	alertFireHandler := alertsvc.NewHandleAlertFire(alertEngine, logger)
+	notifySendHandler := alertsvc.NewHandleNotifySend(logger)
+
 	// ── Probe engine (PC.1) ───────────────────────────────────────────────
 	probeStore := postgres.NewProbeStore(db)
 	probeSvc := probe.NewService(probeStore, domainStore, asynqClient, logger)
@@ -173,7 +180,8 @@ func main() {
 	mux.HandleFunc(tasks.TypeProbeRunL1, probeL1Handler.ProcessTask)
 	mux.HandleFunc(tasks.TypeProbeRunL2, probeL2Handler.ProcessTask)
 	mux.HandleFunc(tasks.TypeProbeRunL3, probeL3Handler.ProcessTask)
-	mux.HandleFunc(tasks.TypeNotifySend, stubFor(tasks.TypeNotifySend))
+	mux.HandleFunc(tasks.TypeAlertFire, alertFireHandler.ProcessTask)
+	mux.HandleFunc(tasks.TypeNotifySend, notifySendHandler.ProcessTask)
 
 	// ── Periodic scheduler ────────────────────────────────────────────────────
 	// Uses asynq.Scheduler to enqueue recurring tasks at fixed intervals.

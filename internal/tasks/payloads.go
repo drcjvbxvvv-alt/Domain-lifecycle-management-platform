@@ -119,11 +119,28 @@ type DNSDriftCheckPayload struct {
 	DNSProviderID int64  `json:"dns_provider_id"`
 }
 
+// ── Alert ─────────────────────────────────────────────────────────────────────
+
+// AlertFirePayload is the payload for TypeAlertFire.
+// The engine picks it up, deduplicates, persists, and fans out TypeNotifySend tasks.
+type AlertFirePayload struct {
+	Severity   string `json:"severity"`              // P1 | P2 | P3 | INFO
+	Source     string `json:"source"`                // probe | drift | expiry | agent | manual | system
+	TargetKind string `json:"target_kind"`
+	TargetID   *int64 `json:"target_id,omitempty"`
+	Title      string `json:"title"`
+	Detail     string `json:"detail,omitempty"` // JSON string
+	DedupKey   string `json:"dedup_key,omitempty"`
+}
+
 // ── Notify ────────────────────────────────────────────────────────────────────
 
 // NotifySendPayload is the payload for TypeNotifySend.
+// Config carries channel-specific credentials (e.g. bot_token + chat_id for Telegram)
+// so the handler is self-contained without a DB round-trip.
 type NotifySendPayload struct {
-	Channel  string `json:"channel"`           // "telegram" | "slack" | "webhook"
+	Channel  string `json:"channel"`            // "telegram" | "slack" | "webhook"
+	Config   []byte `json:"config"`             // channel-specific JSON config
 	Subject  string `json:"subject"`
 	Body     string `json:"body"`
 	Severity string `json:"severity,omitempty"` // "info" | "warn" | "error"

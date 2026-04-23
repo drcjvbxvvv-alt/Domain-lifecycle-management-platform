@@ -31,6 +31,7 @@ type Deps struct {
 	PermissionChecker        middleware.DNSPermissionChecker
 	DNSTemplateHandler       *handler.DNSTemplateHandler
 	ProbeHandler             *handler.ProbeHandler
+	AlertHandler             *handler.AlertHandler
 	JWTManager               *auth.JWTManager
 }
 
@@ -275,5 +276,25 @@ func RegisterV1(r *gin.Engine, deps Deps) {
 
 		// Probe results nested under domains
 		domains.GET("/:id/probe-results", middleware.RequireAnyRole("viewer", "operator", "release_manager", "admin", "auditor"), deps.ProbeHandler.ListDomainResults)
+
+		// ── Alerts (PC.2) ─────────────────────────────────────────────────
+		alerts := authed.Group("/alerts")
+		{
+			alerts.GET("", middleware.RequireAnyRole("viewer", "operator", "release_manager", "admin", "auditor"), deps.AlertHandler.ListAlerts)
+			alerts.GET("/summary", middleware.RequireAnyRole("viewer", "operator", "release_manager", "admin", "auditor"), deps.AlertHandler.AlertSummary)
+			alerts.GET("/:id", middleware.RequireAnyRole("viewer", "operator", "release_manager", "admin", "auditor"), deps.AlertHandler.GetAlert)
+			alerts.POST("/:id/resolve", middleware.RequireAnyRole("operator", "release_manager", "admin"), deps.AlertHandler.ResolveAlert)
+			alerts.POST("/:id/acknowledge", middleware.RequireAnyRole("operator", "release_manager", "admin"), deps.AlertHandler.AcknowledgeAlert)
+		}
+
+		// ── Notification Rules (PC.2) ─────────────────────────────────────
+		notifRules := authed.Group("/notification-rules")
+		{
+			notifRules.GET("", middleware.RequireAnyRole("viewer", "operator", "release_manager", "admin", "auditor"), deps.AlertHandler.ListRules)
+			notifRules.POST("", middleware.RequireAnyRole("admin"), deps.AlertHandler.CreateRule)
+			notifRules.GET("/:id", middleware.RequireAnyRole("viewer", "operator", "release_manager", "admin", "auditor"), deps.AlertHandler.GetRule)
+			notifRules.PUT("/:id", middleware.RequireAnyRole("admin"), deps.AlertHandler.UpdateRule)
+			notifRules.DELETE("/:id", middleware.RequireAnyRole("admin"), deps.AlertHandler.DeleteRule)
+		}
 	}
 }

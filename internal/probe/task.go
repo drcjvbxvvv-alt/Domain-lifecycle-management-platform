@@ -7,6 +7,9 @@ import (
 
 	"github.com/hibiken/asynq"
 	"go.uber.org/zap"
+
+	"domain-platform/internal/alert"
+	"domain-platform/internal/tasks"
 )
 
 // ── Schedule-all batch handler ─────────────────────────────────────────────────
@@ -76,6 +79,10 @@ func (h *HandleL1) run(ctx context.Context, p RunPayload) error {
 		h.logger.Error("probe l1: save result failed", zap.Error(saveErr))
 	}
 
+	if result.Status == StatusFail || result.Status == StatusTimeout || result.Status == StatusError {
+		fireProbeAlert(ctx, h.svc, h.logger, 1, "P1", p)
+	}
+
 	return h.svc.probeStore.CompleteTask(ctx, p.ProbeTaskID, result.ErrorMessage)
 }
 
@@ -124,6 +131,10 @@ func (h *HandleL2) run(ctx context.Context, p RunPayload) error {
 	saveErr := h.svc.SaveResult(ctx, p.ProbeTaskID, p.DomainID, p.PolicyID, 2, result)
 	if saveErr != nil {
 		h.logger.Error("probe l2: save result failed", zap.Error(saveErr))
+	}
+
+	if result.Status == StatusFail || result.Status == StatusTimeout || result.Status == StatusError {
+		fireProbeAlert(ctx, h.svc, h.logger, 2, "P2", p)
 	}
 
 	return h.svc.probeStore.CompleteTask(ctx, p.ProbeTaskID, result.ErrorMessage)
@@ -175,5 +186,35 @@ func (h *HandleL3) run(ctx context.Context, p RunPayload) error {
 		h.logger.Error("probe l3: save result failed", zap.Error(saveErr))
 	}
 
+	if result.Status == StatusFail || result.Status == StatusTimeout || result.Status == StatusError {
+		fireProbeAlert(ctx, h.svc, h.logger, 3, "P3", p)
+	}
+
 	return h.svc.probeStore.CompleteTask(ctx, p.ProbeTaskID, result.ErrorMessage)
+}
+
+// ── helpers ───────────────────────────────────────────────────────────────────
+
+// fireProbeAlert enqueues a TypeAlertFire task when a probe check fails.
+// Severity: L1=P1 (infrastructure), L2=P2 (release mismatch), L3=P3 (health).
+// Dedup key: probe:lN:domain:<id> — suppresses duplicate alerts within 1 hour.
+func fireProbeAlert(ctx context.Context, svc *Service, logger *zap.Logger, tier int, severity string, p RunPayload) {
+	domainID := p.DomainID
+	dedupKey := fmt.Sprintf("probe:l%d:domain:%d", tier, domainID)
+	title := fmt.Sprintf("L%d probe failed: %s", tier, p.FQDN)
+
+	payload := tasks.AlertFirePayload{
+		Severity:   severity,
+		Source:     "probe",
+		TargetKind: "domain",
+		TargetID:   &domainID,
+		Title:      title,
+		DedupKey:   dedupKey,
+	}
+	if err := alert.EnqueueFire(ctx, svc.asynqClient, payload); err != nil {
+		logger.Warn("probe: enqueue alert fire failed",
+			zap.String("dedup_key", dedupKey),
+			zap.Error(err),
+		)
+	}
 }

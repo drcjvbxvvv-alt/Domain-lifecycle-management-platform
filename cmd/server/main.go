@@ -18,6 +18,7 @@ import (
 	"domain-platform/api/middleware"
 	"domain-platform/api/router"
 	agentsvc "domain-platform/internal/agent"
+	alertsvc "domain-platform/internal/alert"
 	"domain-platform/internal/auth"
 	"domain-platform/internal/bootstrap"
 	costsvc "domain-platform/internal/cost"
@@ -152,6 +153,10 @@ func main() {
 	probeStore := postgres.NewProbeStore(db)
 	probeHandler := handler.NewProbeHandler(probeStore)
 
+	alertStore := postgres.NewAlertStore(db)
+	alertEngine := alertsvc.NewEngine(alertStore, asynqClient, logger)
+	alertHandler := handler.NewAlertHandler(alertStore, alertEngine, logger)
+
 	// ── Management API listener (:8080, JWT auth) ──────────────────────────
 	mgmtRouter := buildManagementRouter(logger, router.Deps{
 		AuthHandler:        authHandler,
@@ -175,6 +180,7 @@ func main() {
 		PermissionChecker:       permSvc,
 		DNSTemplateHandler:      dnsTemplateHandler,
 		ProbeHandler:            probeHandler,
+		AlertHandler:            alertHandler,
 		JWTManager:              jwtMgr,
 	})
 	mgmtAddr := fmt.Sprintf("%s:%d", cfg.Server.Host, cfg.Server.Port)

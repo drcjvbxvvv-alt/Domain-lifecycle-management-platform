@@ -552,21 +552,26 @@ CREATE INDEX idx_probe_tasks_domain    ON probe_tasks (domain_id, scheduled_for 
 -- ALERTS                                                     [P3]
 -- ============================================================
 CREATE TABLE alert_events (
-    id            BIGSERIAL PRIMARY KEY,
-    uuid          UUID NOT NULL DEFAULT gen_random_uuid(),
-    severity      VARCHAR(8) NOT NULL,
-    target_kind   VARCHAR(32) NOT NULL,
-    target_id     BIGINT,
-    title         VARCHAR(200) NOT NULL,
-    detail        JSONB,
-    dedup_key     VARCHAR(200),
-    notified_at   TIMESTAMPTZ,
-    resolved_at   TIMESTAMPTZ,
-    created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    CONSTRAINT chk_alert_events_severity CHECK (severity IN ('P1', 'P2', 'P3', 'INFO'))
+    id                BIGSERIAL PRIMARY KEY,
+    uuid              UUID NOT NULL DEFAULT gen_random_uuid(),
+    severity          VARCHAR(8)   NOT NULL,
+    source            VARCHAR(32)  NOT NULL DEFAULT 'system',  -- probe | drift | expiry | agent | manual
+    target_kind       VARCHAR(32)  NOT NULL,
+    target_id         BIGINT,
+    title             VARCHAR(200) NOT NULL,
+    detail            JSONB,
+    dedup_key         VARCHAR(200),
+    notified_at       TIMESTAMPTZ,
+    resolved_at       TIMESTAMPTZ,
+    acknowledged_at   TIMESTAMPTZ,
+    acknowledged_by   BIGINT REFERENCES users(id),
+    created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT chk_alert_events_severity CHECK (severity IN ('P1', 'P2', 'P3', 'INFO')),
+    CONSTRAINT chk_alert_events_source   CHECK (source IN ('probe', 'drift', 'expiry', 'agent', 'manual', 'system'))
 );
 CREATE INDEX idx_alert_events_dedup       ON alert_events (dedup_key, created_at DESC);
 CREATE INDEX idx_alert_events_unresolved  ON alert_events (severity, created_at DESC) WHERE resolved_at IS NULL;
+CREATE INDEX idx_alert_events_target      ON alert_events (target_kind, target_id, created_at DESC);
 
 CREATE TABLE notification_rules (
     id              BIGSERIAL PRIMARY KEY,
@@ -581,6 +586,7 @@ CREATE TABLE notification_rules (
     created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     CONSTRAINT chk_notification_rules_channel CHECK (channel IN ('telegram', 'webhook', 'slack'))
 );
+CREATE INDEX idx_notification_rules_enabled ON notification_rules (enabled, severity_filter) WHERE enabled = true;
 
 -- ============================================================
 -- AGENT VERSIONS & UPGRADES                                  [P3]

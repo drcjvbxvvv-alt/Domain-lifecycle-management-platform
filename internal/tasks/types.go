@@ -42,6 +42,9 @@ const (
 	TypeDNSDriftCheckAll = "dns:drift_check_all" // batch: enqueue TypeDNSDriftCheck per active domain with provider
 	TypeDNSDriftCheck    = "dns:drift_check"     // single domain: run drift check, alert on deviation
 
+	// Alert engine (PC.2)
+	TypeAlertFire = "alert:fire" // persist alert_event + dedup + enqueue notify:send
+
 	// Notify
 	TypeNotifySend = "notify:send"
 )
