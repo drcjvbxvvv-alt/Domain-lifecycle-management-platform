@@ -110,7 +110,7 @@ Phase A（DNS Provider 能力建設）
 ├── A.1  DNS Provider 介面擴充（Record CRUD 方法）  ✅ (完成)
 ├── A.2  Cloudflare DNS Record CRUD        [depends: A.1]  ✅ (完成)
 ├── A.3  阿里雲 DNS (ALIDNS) Record CRUD   [depends: A.1]  ✅ (完成)
-├── A.4  騰訊雲 DNSPod Record CRUD         [depends: A.1]
+├── A.4  騰訊雲 DNSPod Record CRUD         [depends: A.1]  ✅ (完成)
 ├── A.5  華為雲 DNS Record CRUD            [depends: A.1]
 └── A.6  DNS 記錄管理 UI                   [depends: A.1 + 至少一個 A.2-5]
 
@@ -358,7 +358,7 @@ TestAliyunDNS_InvalidCredentials → ErrUnauthorized
 
 ---
 
-### A.4 騰訊雲 DNSPod Record CRUD
+### A.4 騰訊雲 DNSPod Record CRUD ✅ (完成)
 
 **API**: `https://dnspod.tencentcloudapi.com` — 騰訊雲 API 3.0，使用 TC3-HMAC-SHA256 簽名。
 
