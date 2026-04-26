@@ -111,7 +111,7 @@ Phase A（DNS Provider 能力建設）
 ├── A.2  Cloudflare DNS Record CRUD        [depends: A.1]  ✅ (完成)
 ├── A.3  阿里雲 DNS (ALIDNS) Record CRUD   [depends: A.1]  ✅ (完成)
 ├── A.4  騰訊雲 DNSPod Record CRUD         [depends: A.1]  ✅ (完成)
-├── A.5  華為雲 DNS Record CRUD            [depends: A.1]
+├── A.5  華為雲 DNS Record CRUD            [depends: A.1]  ✅ (完成)
 └── A.6  DNS 記錄管理 UI                   [depends: A.1 + 至少一個 A.2-5]
 
 Phase B（域名與 DNS 整合）        [depends: A 完成]
@@ -412,7 +412,7 @@ type TencentDNSRequest struct {
 
 ---
 
-### A.5 華為雲 DNS Record CRUD
+### A.5 華為雲 DNS Record CRUD ✅ (完成)
 
 **API**: `https://dns.myhuaweicloud.com/v2` — RESTful JSON API，使用 AK/SK 簽名（HMAC-SHA256，與騰訊 TC3 類似）。
 
