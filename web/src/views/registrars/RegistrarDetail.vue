@@ -16,6 +16,8 @@ import type {
   RegistrarAccountResponse,
   CreateRegistrarAccountRequest,
   GoDaddyCredentials,
+  NamecheapCredentials,
+  AliyunCredentials,
   SyncResult,
 } from '@/types/registrar'
 
@@ -120,27 +122,37 @@ const credAccountId   = ref<number | null>(null)
 const credAccountName = ref('')
 const savingCreds     = ref(false)
 
-// GoDaddy specific form
-const godaddyForm = ref<GoDaddyCredentials>({
-  key:         '',
-  secret:      '',
-  environment: 'production',
-})
+const isGoDaddy   = computed(() => store.current?.api_type === 'godaddy')
+const isNamecheap = computed(() => store.current?.api_type === 'namecheap')
+const isAliyun    = computed(() => store.current?.api_type === 'aliyun')
+
+// ── Per-provider forms ────────────────────────────────────────────────────────
+const godaddyForm = ref<GoDaddyCredentials>({ key: '', secret: '', environment: 'production' })
 const godaddyEnvOptions = [
   { label: '正式環境 (Production)', value: 'production' },
-  { label: '沙盒環境 (OTE)', value: 'ote' },
+  { label: '沙盒環境 (OTE)',        value: 'ote'        },
 ]
 
-// Generic JSON fallback
-const rawCredsJSON = ref('')
-const credsJSONError = ref('')
+const namecheapForm = ref<NamecheapCredentials>({
+  api_user: '', api_key: '', username: '', client_ip: '', environment: 'production',
+})
+const namecheapEnvOptions = [
+  { label: '正式環境 (Production)', value: 'production' },
+  { label: '沙盒環境 (Sandbox)',    value: 'sandbox'    },
+]
 
-const isGoDaddy = computed(() => store.current?.api_type === 'godaddy')
+const aliyunForm = ref<AliyunCredentials>({ access_key_id: '', access_key_secret: '' })
+
+// Generic JSON fallback for unsupported provider types
+const rawCredsJSON   = ref('')
+const credsJSONError = ref('')
 
 function openCredentials(account: RegistrarAccountResponse) {
   credAccountId.value   = account.id
   credAccountName.value = account.account_name
   godaddyForm.value     = { key: '', secret: '', environment: 'production' }
+  namecheapForm.value   = { api_user: '', api_key: '', username: '', client_ip: '', environment: 'production' }
+  aliyunForm.value      = { access_key_id: '', access_key_secret: '' }
   rawCredsJSON.value    = '{}'
   credsJSONError.value  = ''
   showCredentials.value = true
@@ -150,12 +162,32 @@ async function submitCredentials() {
   if (credAccountId.value === null) return
 
   let credentials: Record<string, unknown>
+
   if (isGoDaddy.value) {
     if (!godaddyForm.value.key.trim() || !godaddyForm.value.secret.trim()) {
       message.warning('Key 和 Secret 不能為空')
       return
     }
     credentials = { ...godaddyForm.value }
+
+  } else if (isNamecheap.value) {
+    if (!namecheapForm.value.api_user.trim() || !namecheapForm.value.api_key.trim() || !namecheapForm.value.client_ip.trim()) {
+      message.warning('API User、API Key 和 Client IP 不能為空')
+      return
+    }
+    credentials = {
+      ...namecheapForm.value,
+      // username defaults to api_user if left blank
+      username: namecheapForm.value.username.trim() || namecheapForm.value.api_user.trim(),
+    }
+
+  } else if (isAliyun.value) {
+    if (!aliyunForm.value.access_key_id.trim() || !aliyunForm.value.access_key_secret.trim()) {
+      message.warning('AccessKey ID 和 Secret 不能為空')
+      return
+    }
+    credentials = { ...aliyunForm.value }
+
   } else {
     try {
       credentials = JSON.parse(rawCredsJSON.value)
@@ -363,39 +395,64 @@ onMounted(async () => {
         憑證儲存後伺服器端加密保存，API 回應不會返回憑證內容。
       </NAlert>
 
-      <!-- GoDaddy specific fields -->
+      <!-- GoDaddy -->
       <template v-if="isGoDaddy">
-        <NForm label-placement="left" label-width="80px" :model="godaddyForm">
+        <NForm label-placement="left" label-width="90px" :model="godaddyForm">
           <NFormItem label="Key" required>
-            <NInput
-              v-model:value="godaddyForm.key"
-              placeholder="dKy4Gxxx..."
-              show-password-on="click"
-              type="password"
-            />
+            <NInput v-model:value="godaddyForm.key" type="password" show-password-on="click" placeholder="dKy4Gxxx..." />
           </NFormItem>
           <NFormItem label="Secret" required>
-            <NInput
-              v-model:value="godaddyForm.secret"
-              placeholder="Sdxxx..."
-              show-password-on="click"
-              type="password"
-            />
+            <NInput v-model:value="godaddyForm.secret" type="password" show-password-on="click" placeholder="Sdxxx..." />
           </NFormItem>
           <NFormItem label="環境">
             <NSelect v-model:value="godaddyForm.environment" :options="godaddyEnvOptions" />
           </NFormItem>
         </NForm>
         <NAlert type="info" style="margin-top:8px">
-          API Key 和 Secret 從
-          <a href="https://developer.godaddy.com/keys" target="_blank" rel="noopener">
-            developer.godaddy.com/keys
-          </a>
-          取得。OTE 為沙盒測試環境。
+          Key / Secret 從 <a href="https://developer.godaddy.com/keys" target="_blank" rel="noopener">developer.godaddy.com/keys</a> 取得。OTE 為沙盒環境。
         </NAlert>
       </template>
 
-      <!-- Generic JSON fallback -->
+      <!-- Namecheap -->
+      <template v-else-if="isNamecheap">
+        <NForm label-placement="left" label-width="100px" :model="namecheapForm">
+          <NFormItem label="API User" required>
+            <NInput v-model:value="namecheapForm.api_user" placeholder="你的 Namecheap 帳號名稱" />
+          </NFormItem>
+          <NFormItem label="API Key" required>
+            <NInput v-model:value="namecheapForm.api_key" type="password" show-password-on="click" placeholder="32 位元 hex key" />
+          </NFormItem>
+          <NFormItem label="Client IP" required>
+            <NInput v-model:value="namecheapForm.client_ip" placeholder="本伺服器對外 IP" />
+          </NFormItem>
+          <NFormItem label="Username">
+            <NInput v-model:value="namecheapForm.username" placeholder="留空則自動同步 API User" />
+          </NFormItem>
+          <NFormItem label="環境">
+            <NSelect v-model:value="namecheapForm.environment" :options="namecheapEnvOptions" />
+          </NFormItem>
+        </NForm>
+        <NAlert type="warning" style="margin-top:8px">
+          Client IP 必須加入 Namecheap 白名單：Profile → Tools → Namecheap API Access → Whitelisted IPs
+        </NAlert>
+      </template>
+
+      <!-- 阿里雲 -->
+      <template v-else-if="isAliyun">
+        <NForm label-placement="left" label-width="130px" :model="aliyunForm">
+          <NFormItem label="AccessKey ID" required>
+            <NInput v-model:value="aliyunForm.access_key_id" placeholder="LTAI5t..." />
+          </NFormItem>
+          <NFormItem label="AccessKey Secret" required>
+            <NInput v-model:value="aliyunForm.access_key_secret" type="password" show-password-on="click" placeholder="Secret..." />
+          </NFormItem>
+        </NForm>
+        <NAlert type="info" style="margin-top:8px">
+          AccessKey 從阿里雲 RAM 控制台 → 存取控制 → AccessKey 管理 取得。建議使用子帳號並只授予域名唯讀權限。
+        </NAlert>
+      </template>
+
+      <!-- Generic JSON fallback for unsupported types -->
       <template v-else>
         <NForm label-placement="top">
           <NFormItem label="Credentials JSON">
@@ -403,7 +460,7 @@ onMounted(async () => {
               v-model:value="rawCredsJSON"
               type="textarea"
               :rows="6"
-              placeholder='{"api_key": "...", "api_secret": "..."}'
+              placeholder='{"key": "...", "secret": "..."}'
               :status="credsJSONError ? 'error' : undefined"
             />
             <template v-if="credsJSONError" #feedback>{{ credsJSONError }}</template>

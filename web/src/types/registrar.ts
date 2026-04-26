@@ -72,13 +72,28 @@ export interface SyncResult {
   errors?: SyncItemError[]
 }
 
-// ── GoDaddy credentials shape ────────────────────────────────────────────────
-// Used by the credential editor in RegistrarDetail.vue for api_type === 'godaddy'
+// ── Provider credentials shapes ──────────────────────────────────────────────
+// Used by the credential editor in RegistrarDetail.vue.
+// Field names must match the Go structs in pkg/provider/registrar/*.go exactly.
 
-// GoDaddyCredentials field names match exactly what GoDaddy's developer portal
-// labels them — "Key" and "Secret" (developer.godaddy.com/keys).
+// GoDaddy: field names match GoDaddy dev portal labels (developer.godaddy.com/keys)
 export interface GoDaddyCredentials {
   key: string
   secret: string
   environment: 'production' | 'ote'
+}
+
+// Namecheap: api_user + api_key + client_ip (must be whitelisted in account)
+export interface NamecheapCredentials {
+  api_user: string
+  api_key: string
+  username: string       // usually same as api_user; leave blank to auto-copy
+  client_ip: string      // server IP — must be whitelisted in Namecheap Profile > Tools > API Access
+  environment: 'production' | 'sandbox'
+}
+
+// Aliyun (阿里雲萬網): AccessKey pair from RAM console
+export interface AliyunCredentials {
+  access_key_id: string
+  access_key_secret: string
 }

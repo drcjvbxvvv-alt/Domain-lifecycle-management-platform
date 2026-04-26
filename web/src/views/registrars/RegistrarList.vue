@@ -32,33 +32,52 @@ const apiTypeLabel: Record<string, string> = {
   manual:       '其他',
 }
 
+const isNamecheap = computed(() => form.value.api_type === 'namecheap')
+const isAliyun    = computed(() => form.value.api_type === 'aliyun')
+
 // ── Create modal state ────────────────────────────────────────────────────────
 const showCreate = ref(false)
 const creating   = ref(false)
 
 const form = ref({
-  // 註冊商基本資訊
+  // 基本資訊
   name:     '',
   api_type: null as string | null,
   url:      null as string | null,
   notes:    null as string | null,
-  // 第一個帳號的憑證（GoDaddy 用）
-  key:     '',
-  secret:  '',
-  environment: 'production' as 'production' | 'ote',
+  // GoDaddy
+  gd_key:         '',
+  gd_secret:      '',
+  gd_environment: 'production' as 'production' | 'ote',
+  // Namecheap
+  nc_api_user:    '',
+  nc_api_key:     '',
+  nc_client_ip:   '',
+  nc_environment: 'production' as 'production' | 'sandbox',
+  // Aliyun
+  al_access_key_id:     '',
+  al_access_key_secret: '',
 })
 
 const godaddyEnvOptions = [
   { label: '正式環境 (Production)', value: 'production' },
   { label: '沙盒環境 (OTE)',        value: 'ote'        },
 ]
+const namecheapEnvOptions = [
+  { label: '正式環境 (Production)', value: 'production' },
+  { label: '沙盒環境 (Sandbox)',    value: 'sandbox'    },
+]
 
-const isGoDaddy = computed(() => form.value.api_type === 'godaddy')
+const isGoDaddy  = computed(() => form.value.api_type === 'godaddy')
+const isNamecheap = computed(() => form.value.api_type === 'namecheap')
+const isAliyun    = computed(() => form.value.api_type === 'aliyun')
 
 function openCreate() {
   form.value = {
     name: '', api_type: null, url: null, notes: null,
-    key: '', secret: '', environment: 'production',
+    gd_key: '', gd_secret: '', gd_environment: 'production',
+    nc_api_user: '', nc_api_key: '', nc_client_ip: '', nc_environment: 'production',
+    al_access_key_id: '', al_access_key_secret: '',
   }
   showCreate.value = true
 }
@@ -68,16 +87,21 @@ async function submitCreate() {
     message.warning('請輸入名稱')
     return
   }
-  if (isGoDaddy.value) {
-    if (!form.value.key.trim() || !form.value.secret.trim()) {
-      message.warning('請填入 GoDaddy API Key 和 Secret')
-      return
-    }
+  if (isGoDaddy.value && (!form.value.gd_key.trim() || !form.value.gd_secret.trim())) {
+    message.warning('請填入 GoDaddy API Key 和 Secret')
+    return
+  }
+  if (isNamecheap.value && (!form.value.nc_api_user.trim() || !form.value.nc_api_key.trim() || !form.value.nc_client_ip.trim())) {
+    message.warning('請填入 Namecheap API User、API Key 和 Client IP')
+    return
+  }
+  if (isAliyun.value && (!form.value.al_access_key_id.trim() || !form.value.al_access_key_secret.trim())) {
+    message.warning('請填入阿里雲 AccessKey ID 和 AccessKey Secret')
+    return
   }
 
   creating.value = true
   try {
-    // 建立註冊商
     const registrar = await store.create({
       name:     form.value.name,
       api_type: form.value.api_type,
@@ -85,23 +109,42 @@ async function submitCreate() {
       notes:    form.value.notes,
     })
 
-    // 如有輸入憑證，自動建立預設帳號
-    if (registrar && isGoDaddy.value && form.value.key.trim()) {
-      await store.createAccount(registrar.id, {
-        account_name: '預設帳號',
-        is_default:   true,
-        credentials: {
-          key:         form.value.key.trim(),
-          secret:      form.value.secret.trim(),
-          environment: form.value.environment,
-        },
-      })
+    // 自動建立預設帳號（附帶憑證）
+    if (registrar) {
+      let credentials: Record<string, unknown> | null = null
+
+      if (isGoDaddy.value && form.value.gd_key.trim()) {
+        credentials = {
+          key:         form.value.gd_key.trim(),
+          secret:      form.value.gd_secret.trim(),
+          environment: form.value.gd_environment,
+        }
+      } else if (isNamecheap.value && form.value.nc_api_user.trim()) {
+        credentials = {
+          api_user:    form.value.nc_api_user.trim(),
+          api_key:     form.value.nc_api_key.trim(),
+          username:    form.value.nc_api_user.trim(),
+          client_ip:   form.value.nc_client_ip.trim(),
+          environment: form.value.nc_environment,
+        }
+      } else if (isAliyun.value && form.value.al_access_key_id.trim()) {
+        credentials = {
+          access_key_id:     form.value.al_access_key_id.trim(),
+          access_key_secret: form.value.al_access_key_secret.trim(),
+        }
+      }
+
+      if (credentials) {
+        await store.createAccount(registrar.id, {
+          account_name: '預設帳號',
+          is_default:   true,
+          credentials,
+        })
+      }
     }
 
     message.success('建立成功')
     showCreate.value = false
-
-    // 直接進入詳情頁
     if (registrar) {
       router.push({ name: 'RegistrarDetail', params: { id: registrar.id } })
     }
@@ -203,7 +246,7 @@ onMounted(() => store.fetchList())
           <NInput v-model:value="(form as any).notes" type="textarea" :rows="2" clearable />
         </NFormItem>
 
-        <!-- GoDaddy 憑證（選了 GoDaddy 才顯示） -->
+        <!-- GoDaddy 憑證 -->
         <template v-if="isGoDaddy">
           <NDivider style="margin: 8px 0">
             <NText depth="3" style="font-size: 12px">
@@ -211,23 +254,49 @@ onMounted(() => store.fetchList())
             </NText>
           </NDivider>
           <NFormItem label="Key" required>
-            <NInput
-              v-model:value="form.key"
-              type="password"
-              show-password-on="click"
-              placeholder="dKy4Gxxx..."
-            />
+            <NInput v-model:value="form.gd_key" type="password" show-password-on="click" placeholder="dKy4Gxxx..." />
           </NFormItem>
           <NFormItem label="Secret" required>
-            <NInput
-              v-model:value="form.secret"
-              type="password"
-              show-password-on="click"
-              placeholder="Sdxxx..."
-            />
+            <NInput v-model:value="form.gd_secret" type="password" show-password-on="click" placeholder="Sdxxx..." />
           </NFormItem>
           <NFormItem label="環境">
-            <NSelect v-model:value="form.environment" :options="godaddyEnvOptions" />
+            <NSelect v-model:value="form.gd_environment" :options="godaddyEnvOptions" />
+          </NFormItem>
+        </template>
+
+        <!-- Namecheap 憑證 -->
+        <template v-if="isNamecheap">
+          <NDivider style="margin: 8px 0">
+            <NText depth="3" style="font-size: 12px">
+              Namecheap API 憑證（Profile → Tools → Namecheap API Access）
+            </NText>
+          </NDivider>
+          <NFormItem label="API User" required>
+            <NInput v-model:value="form.nc_api_user" placeholder="你的 Namecheap 使用者名稱" />
+          </NFormItem>
+          <NFormItem label="API Key" required>
+            <NInput v-model:value="form.nc_api_key" type="password" show-password-on="click" placeholder="32 位元 hex key" />
+          </NFormItem>
+          <NFormItem label="Client IP" required>
+            <NInput v-model:value="form.nc_client_ip" placeholder="本伺服器的 IP，須加入白名單" />
+          </NFormItem>
+          <NFormItem label="環境">
+            <NSelect v-model:value="form.nc_environment" :options="namecheapEnvOptions" />
+          </NFormItem>
+        </template>
+
+        <!-- 阿里雲憑證 -->
+        <template v-if="isAliyun">
+          <NDivider style="margin: 8px 0">
+            <NText depth="3" style="font-size: 12px">
+              阿里雲 AccessKey（RAM 控制台 → 存取控制 → AccessKey 管理）
+            </NText>
+          </NDivider>
+          <NFormItem label="AccessKey ID" required>
+            <NInput v-model:value="form.al_access_key_id" placeholder="LTAI5t..." />
+          </NFormItem>
+          <NFormItem label="AccessKey Secret" required>
+            <NInput v-model:value="form.al_access_key_secret" type="password" show-password-on="click" placeholder="Secret..." />
           </NFormItem>
         </template>
 
