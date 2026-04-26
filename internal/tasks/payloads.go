@@ -119,6 +119,20 @@ type DNSDriftCheckPayload struct {
 	DNSProviderID int64  `json:"dns_provider_id"`
 }
 
+// ── NS Delegation Check (B.2) ─────────────────────────────────────────────────
+
+// NSCheckAllPayload is the payload for TypeNSCheckAll.
+// Empty — the handler scans all domains with ns_delegation_status IN ('pending', 'mismatch').
+type NSCheckAllPayload struct{}
+
+// NSCheckPayload is the payload for TypeNSCheck.
+type NSCheckPayload struct {
+	DomainID      int64    `json:"domain_id"`
+	FQDN          string   `json:"fqdn"`
+	DNSProviderID int64    `json:"dns_provider_id"`
+	ExpectedNS    []string `json:"expected_ns"`
+}
+
 // ── Alert ─────────────────────────────────────────────────────────────────────
 
 // AlertFirePayload is the payload for TypeAlertFire.

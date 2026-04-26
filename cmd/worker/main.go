@@ -16,6 +16,7 @@ import (
 	"domain-platform/internal/bootstrap"
 	domainsvc "domain-platform/internal/domain"
 	"domain-platform/internal/dnsquery"
+	"domain-platform/internal/dnsrecord"
 	importsvc "domain-platform/internal/importer"
 	"domain-platform/internal/lifecycle"
 	"domain-platform/internal/probe"
@@ -119,6 +120,11 @@ func main() {
 	driftCheckAllHandler := dnsquery.NewHandleDriftCheckAll(domainStore, asynqClient, logger)
 	driftCheckHandler := dnsquery.NewHandleDriftCheck(dnsQuerySvc, domainStore, dnsProviderStore, notifier, rdb, logger)
 
+	// NS delegation verification (B.2)
+	dnsBindingSvc := dnsrecord.NewService(dnsProviderStore, domainStore, logger)
+	nsCheckAllHandler := dnsrecord.NewHandleNSCheckAll(domainStore, dnsProviderStore, dnsBindingSvc, asynqClient, logger)
+	nsCheckHandler := dnsrecord.NewHandleNSCheck(domainStore, notifier, rdb, logger)
+
 	lifecycleStore := postgres.NewLifecycleStore(db)
 	lifecycleSvc := lifecycle.NewService(domainStore, lifecycleStore, logger)
 	importJobStore := postgres.NewImportJobStore(db)
@@ -154,6 +160,8 @@ func main() {
 	mux.HandleFunc(tasks.TypeDomainImport, importSvc.HandleDomainImport)
 	mux.Handle(tasks.TypeDNSDriftCheckAll, driftCheckAllHandler)
 	mux.Handle(tasks.TypeDNSDriftCheck, driftCheckHandler)
+	mux.HandleFunc(tasks.TypeNSCheckAll, nsCheckAllHandler.ProcessTask)
+	mux.HandleFunc(tasks.TypeNSCheck, nsCheckHandler.ProcessTask)
 
 	// ── Stub handlers (log payload, return nil) ───────────────────────────
 	// These will be replaced by real implementations in P2+.
@@ -203,6 +211,14 @@ func main() {
 	driftTask := asynq.NewTask(tasks.TypeDNSDriftCheckAll, driftPayload, asynq.Queue("default"))
 	if _, err := scheduler.Register("@every 30m", driftTask); err != nil {
 		logger.Fatal("register dns drift scheduler", zap.Error(err))
+	}
+
+	// NS delegation check: every hour.
+	// The batch task enqueues one TypeNSCheck per domain with pending/mismatch NS.
+	nsCheckAllPayload, _ := json.Marshal(tasks.NSCheckAllPayload{})
+	nsCheckAllTask := asynq.NewTask(tasks.TypeNSCheckAll, nsCheckAllPayload, asynq.Queue("default"))
+	if _, err := scheduler.Register("@every 1h", nsCheckAllTask); err != nil {
+		logger.Fatal("register ns check_all scheduler", zap.Error(err))
 	}
 
 	// Probe schedule-all: every 5 minutes.

@@ -115,14 +115,14 @@ Phase A（DNS Provider 能力建設）
 └── A.6  DNS 記錄管理 UI                   [depends: A.1 + 至少一個 A.2-5]  ✅ (完成)
 
 Phase B（域名與 DNS 整合）        [depends: A 完成]
-├── B.1  域名與 DNS 供應商帳號綁定
-├── B.2  NS 委派驗證（async probe）        [depends: B.1]
-├── B.3  域名 DNS 記錄同步（pull）         [depends: B.1 + A.2-5]
-└── B.4  DNS 範本套用                      [depends: B.3]
+├── B.1  域名與 DNS 供應商帳號綁定  ✅ (完成)
+├── B.2  NS 委派驗證（async probe）        [depends: B.1]  ✅ (完成)
+├── B.3  域名 DNS 記錄同步（pull）         [depends: B.1 + A.2-5]  ✅ (完成)
+└── B.4  DNS 範本套用                      [depends: B.3]  ✅ (完成)
 
 Phase C（CDN 深度整合）           [depends: B 完成]
-├── C.1  CDN Provider 介面定義
-├── C.2  CDN 域名生命週期                  [depends: C.1]
+├── C.1  CDN Provider 介面定義  ✅ (完成)
+├── C.2  CDN 域名生命週期  ✅ (完成)          [depends: C.1]
 │   ├── 新增加速域名
 │   └── 删除加速域名
 ├── C.3  緩存配置                          [depends: C.2]
@@ -468,7 +468,7 @@ type TencentDNSRequest struct {
 
 ## Phase B — 域名與 DNS 整合
 
-### B.1 域名與 DNS 供應商帳號綁定
+### B.1 域名與 DNS 供應商帳號綁定 ✅ (完成)
 
 #### 資料模型
 
@@ -526,7 +526,7 @@ Response: {
 
 ---
 
-### B.2 NS 委派驗證
+### B.2 NS 委派驗證 ✅ (完成)
 
 #### 設計
 
@@ -565,7 +565,7 @@ type NSCheckPayload struct {
 
 ---
 
-### B.3 域名 DNS 記錄 CRUD
+### B.3 域名 DNS 記錄 CRUD ✅ (完成)
 
 #### 資料模型
 
@@ -620,7 +620,7 @@ Body: { "record_ids": [1, 2, 3] }
 
 ---
 
-### B.4 DNS 範本套用
+### B.4 DNS 範本套用 ✅ (完成)
 
 ```
 POST /api/v1/domains/:id/dns-records/apply-template
@@ -637,7 +637,7 @@ Body: {
 
 ## Phase C — CDN 深度整合
 
-### C.1 CDN Provider 介面定義
+### C.1 CDN Provider 介面定義 ✅ (完成)
 
 #### 核心介面
 
@@ -816,6 +816,8 @@ type HitRatePoint   struct { Time time.Time; Rate float64 }
 
 ---
 
+### C.2 CDN 域名生命週期 ✅ (完成)
+
 ### C.2 資料模型
 
 ```sql
@@ -875,7 +877,7 @@ SELECT create_hypertable('cdn_stats', 'time');
 
 ---
 
-### C.3 各供應商 CDN 實作
+### C.3 各供應商 CDN 實作 ✅ (完成)
 
 #### 阿里雲 CDN
 

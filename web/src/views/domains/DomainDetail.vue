@@ -13,6 +13,8 @@ import {
 import { PageHeader, StatusTag, ConfirmModal, PageHint } from '@/components'
 import DomainDNS from '@/views/domains/DomainDNS.vue'
 import DomainPermissions from '@/views/domains/DomainPermissions.vue'
+import DomainNSSetup from '@/views/domains/DomainNSSetup.vue'
+import DomainCDNSetup from '@/views/domains/DomainCDNSetup.vue'
 import { useDomainStore } from '@/stores/domain'
 import { useRegistrarStore } from '@/stores/registrar'
 import { useDNSProviderStore } from '@/stores/dnsprovider'
@@ -878,6 +880,28 @@ onMounted(async () => {
               <div v-else style="padding:24px; text-align:center; color:var(--text-muted); font-size:13px;">
                 點擊「查詢 DNS 記錄」按鈕以取得此域名的即時 DNS 解析結果（A / AAAA / CNAME / MX / TXT / NS / SOA / SRV / CAA）
               </div>
+            </div>
+          </NTabPane>
+
+          <!-- NS Delegation Setup tab (B.1) -->
+          <NTabPane name="ns-setup" tab="NS 委派">
+            <div class="tab-section">
+              <DomainNSSetup
+                v-if="store.current"
+                :domain-id="domainId"
+                @updated="store.fetchOne(domainId)"
+              />
+            </div>
+          </NTabPane>
+
+          <!-- CDN Binding Setup tab (C.2) -->
+          <NTabPane name="cdn-setup" tab="CDN 加速">
+            <div class="tab-section">
+              <DomainCDNSetup
+                v-if="store.current"
+                :domain-id="domainId"
+                @updated="store.fetchOne(domainId)"
+              />
             </div>
           </NTabPane>
 

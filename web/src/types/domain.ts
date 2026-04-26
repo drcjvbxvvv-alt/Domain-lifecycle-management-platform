@@ -63,12 +63,31 @@ export interface DomainResponse {
   notes:    string | null
   metadata: Record<string, unknown> | null
 
+  // NS delegation tracking (PB.1)
+  ns_delegation_status: NSDelegationStatus
+  ns_verified_at:       string | null
+  ns_last_checked_at:   string | null
+  ns_actual:            string[]
+
   // Drift / sync tracking (PB.7)
   last_sync_at:  string | null
   last_drift_at: string | null
 
   created_at: string
   updated_at: string
+}
+
+// NSDelegationStatus mirrors the ns_delegation_status column.
+export type NSDelegationStatus = 'unset' | 'pending' | 'verified' | 'mismatch'
+
+// DNSBindingStatus is returned by GET /domains/:id/dns-binding.
+export interface DNSBindingStatus {
+  dns_provider_id:       number | null
+  ns_delegation_status:  NSDelegationStatus
+  expected_nameservers:  string[]
+  actual_nameservers:    string[]
+  ns_verified_at:        string | null
+  ns_last_checked_at:    string | null
 }
 
 export interface RegisterDomainRequest {

@@ -68,6 +68,12 @@ type Domain struct {
 	Notes    *string         `db:"notes"`
 	Metadata json.RawMessage `db:"metadata"`
 
+	// NS delegation tracking (PB.1)
+	NSDelegationStatus string         `db:"ns_delegation_status"` // unset | pending | verified | mismatch
+	NSVerifiedAt       *time.Time     `db:"ns_verified_at"`
+	NSLastCheckedAt    *time.Time     `db:"ns_last_checked_at"`
+	NSActual           pq.StringArray `db:"ns_actual"`
+
 	// Drift / sync tracking (PB.7)
 	LastSyncAt  *time.Time `db:"last_sync_at"`
 	LastDriftAt *time.Time `db:"last_drift_at"`
@@ -97,6 +103,7 @@ const domainColumns = `id, uuid, project_id, fqdn, lifecycle_state, owner_user_i
 	whois_privacy, registrant_contact, admin_contact, tech_contact,
 	annual_cost, currency, purchase_price, fee_fixed,
 	purpose, notes, metadata,
+	ns_delegation_status, ns_verified_at, ns_last_checked_at, ns_actual,
 	last_sync_at, last_drift_at,
 	created_at, updated_at, deleted_at`
 
@@ -576,6 +583,7 @@ const enrichedDomainSelect = `d.id, d.uuid, d.project_id, d.fqdn, d.lifecycle_st
 	d.whois_privacy, d.registrant_contact, d.admin_contact, d.tech_contact,
 	d.annual_cost, d.currency, d.purchase_price, d.fee_fixed,
 	d.purpose, d.notes, d.metadata,
+	d.ns_delegation_status, d.ns_verified_at, d.ns_last_checked_at, d.ns_actual,
 	d.last_sync_at, d.last_drift_at,
 	d.created_at, d.updated_at, d.deleted_at,
 	r.name     AS registrar_name,
@@ -810,6 +818,70 @@ func (s *DomainStore) ListExpiring(ctx context.Context, days int) ([]Domain, err
 		 ORDER BY expiry_date ASC`, days)
 	if err != nil {
 		return nil, fmt.Errorf("list expiring domains: %w", err)
+	}
+	return domains, nil
+}
+
+// UpdateNSDelegation updates the NS delegation tracking columns for a domain.
+// status must be one of: unset | pending | verified | mismatch.
+// actual is the live nameserver list observed during the check (may be empty).
+func (s *DomainStore) UpdateNSDelegation(ctx context.Context, domainID int64, status string, actual pq.StringArray) error {
+	if actual == nil {
+		actual = pq.StringArray{}
+	}
+	var verifiedAt *time.Time
+	if status == "verified" {
+		now := time.Now()
+		verifiedAt = &now
+	}
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE domains SET
+			ns_delegation_status = $2,
+			ns_actual            = $3,
+			ns_last_checked_at   = NOW(),
+			ns_verified_at       = CASE WHEN $2 = 'verified' THEN $4 ELSE ns_verified_at END,
+			updated_at           = NOW()
+		WHERE id = $1 AND deleted_at IS NULL`,
+		domainID, status, actual, verifiedAt,
+	)
+	if err != nil {
+		return fmt.Errorf("update ns delegation: %w", err)
+	}
+	return nil
+}
+
+// SetNSDelegationPending sets ns_delegation_status = 'pending' for a domain
+// when a DNS provider is bound. Clears ns_actual and ns_verified_at.
+func (s *DomainStore) SetNSDelegationPending(ctx context.Context, domainID int64) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE domains SET
+			ns_delegation_status = 'pending',
+			ns_actual            = '{}',
+			ns_verified_at       = NULL,
+			ns_last_checked_at   = NULL,
+			updated_at           = NOW()
+		WHERE id = $1 AND deleted_at IS NULL`,
+		domainID,
+	)
+	if err != nil {
+		return fmt.Errorf("set ns delegation pending: %w", err)
+	}
+	return nil
+}
+
+// ListWithPendingNS returns domains whose ns_delegation_status is pending or mismatch
+// and that have a dns_provider_id set. Used by the NS check scheduler.
+func (s *DomainStore) ListWithPendingNS(ctx context.Context) ([]Domain, error) {
+	var domains []Domain
+	err := s.db.SelectContext(ctx, &domains,
+		`SELECT `+domainColumns+`
+		 FROM domains
+		 WHERE deleted_at IS NULL
+		   AND dns_provider_id IS NOT NULL
+		   AND ns_delegation_status IN ('pending', 'mismatch')
+		 ORDER BY id ASC`)
+	if err != nil {
+		return nil, fmt.Errorf("list domains with pending ns: %w", err)
 	}
 	return domains, nil
 }

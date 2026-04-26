@@ -24,6 +24,7 @@ import (
 	probesvc "domain-platform/internal/probe"
 	"domain-platform/internal/bootstrap"
 	cdnsvc "domain-platform/internal/cdn"
+	cdndomainsvc "domain-platform/internal/cdndomain"
 	costsvc "domain-platform/internal/cost"
 	domainsvc "domain-platform/internal/domain"
 	dnstemplateSvc "domain-platform/internal/dnstemplate"
@@ -47,6 +48,8 @@ import (
 	_ "domain-platform/pkg/provider/dns"
 	// Side-effect: register registrar provider factories (GoDaddy, etc.).
 	_ "domain-platform/pkg/provider/registrar"
+	// Side-effect: register CDN provider factories in the global cdn registry.
+	_ "domain-platform/pkg/provider/cdn"
 )
 
 func main() {
@@ -127,6 +130,10 @@ func main() {
 	cdnSvc := cdnsvc.NewService(cdnStore, logger)
 	cdnHandler := handler.NewCDNHandler(cdnSvc, logger)
 
+	cdnBindingStore := postgres.NewCDNBindingStore(db)
+	cdnBindingSvc := cdndomainsvc.NewService(cdnBindingStore, cdnStore, logger)
+	cdnBindingHandler := handler.NewCDNBindingHandler(cdnBindingSvc, domainStore, logger)
+
 	dnsProviderStore := postgres.NewDNSProviderStore(db)
 	dnsProviderSvc := dnsprovider.NewService(dnsProviderStore, logger)
 	dnsProviderHandler := handler.NewDNSProviderHandler(dnsProviderSvc, logger)
@@ -155,7 +162,7 @@ func main() {
 
 	dnsRecordSvc := dnsrecsvc.NewService(dnsProviderStore, domainStore, logger)
 	dnsRecordHandler := handler.NewDNSRecordHandler(dnsRecordSvc, lifecycleSvc, logger)
-
+	dnsBindingHandler := handler.NewDNSBindingHandler(dnsRecordSvc, domainStore, asynqClient, logger)
 	domainPermStore := postgres.NewDomainPermissionStore(db)
 	permSvc := domainsvc.NewPermissionService(domainPermStore, roleStore, logger)
 	domainPermHandler := handler.NewDomainPermissionHandler(permSvc, logger)
@@ -163,6 +170,10 @@ func main() {
 	dnsTemplateStore := postgres.NewDNSTemplateStore(db)
 	dnsTemplateSvc := dnstemplateSvc.NewService(dnsTemplateStore, logger)
 	dnsTemplateHandler := handler.NewDNSTemplateHandler(dnsTemplateSvc, logger)
+
+	dnsDNSRecordStore := postgres.NewDomainDNSRecordStore(db)
+	dnsSyncSvc := dnsrecsvc.NewSyncService(dnsProviderStore, domainStore, dnsDNSRecordStore, logger)
+	dnsRecordSyncHandler := handler.NewDNSRecordSyncHandler(dnsSyncSvc, dnsTemplateSvc, domainStore, logger)
 
 	probeStore := postgres.NewProbeStore(db)
 	probeHandler := handler.NewProbeHandler(probeStore)
@@ -216,6 +227,8 @@ func main() {
 		ImportHandler:      importHandler,
 		DNSQueryHandler:         dnsQueryHandler,
 		DNSRecordHandler:        dnsRecordHandler,
+		DNSBindingHandler:       dnsBindingHandler,
+		DNSRecordSyncHandler:    dnsRecordSyncHandler,
 		DomainPermissionHandler: domainPermHandler,
 		PermissionChecker:       permSvc,
 		DNSTemplateHandler:      dnsTemplateHandler,
@@ -226,6 +239,7 @@ func main() {
 		StatusPageHandler:       statusPageHandler,
 		UptimeHandler:           uptimeHandler,
 		CDNHandler:              cdnHandler,
+		CDNBindingHandler:       cdnBindingHandler,
 		ProbeNodeHandler:        probeNodeHandler,
 		JWTManager:              jwtMgr,
 	})

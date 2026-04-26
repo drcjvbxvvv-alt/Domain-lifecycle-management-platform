@@ -27,6 +27,8 @@ type Deps struct {
 	ImportHandler      *handler.ImportHandler
 	DNSQueryHandler          *handler.DNSQueryHandler
 	DNSRecordHandler         *handler.DNSRecordHandler
+	DNSBindingHandler        *handler.DNSBindingHandler
+	DNSRecordSyncHandler     *handler.DNSRecordSyncHandler
 	DomainPermissionHandler  *handler.DomainPermissionHandler
 	PermissionChecker        middleware.DNSPermissionChecker
 	DNSTemplateHandler       *handler.DNSTemplateHandler
@@ -38,6 +40,7 @@ type Deps struct {
 	StatusPageHandler        *handler.StatusPageHandler
 	UptimeHandler            *handler.UptimeHandler
 	CDNHandler               *handler.CDNHandler
+	CDNBindingHandler        *handler.CDNBindingHandler
 	JWTManager               *auth.JWTManager
 }
 
@@ -121,6 +124,18 @@ func RegisterV1(r *gin.Engine, deps Deps) {
 			domains.GET("/:id/dns-records", middleware.RequireAnyRole("viewer", "operator", "release_manager", "admin", "auditor"), deps.DNSQueryHandler.LookupByDomain)
 			domains.GET("/:id/dns-propagation", middleware.RequireAnyRole("viewer", "operator", "release_manager", "admin", "auditor"), deps.DNSQueryHandler.PropagationByDomain)
 			domains.GET("/:id/dns-drift", middleware.RequireAnyRole("viewer", "operator", "release_manager", "admin", "auditor"), deps.DNSQueryHandler.DriftCheck)
+			// DNS provider binding (B.1) + NS delegation verification (B.2)
+			domains.PUT("/:id/dns-binding", middleware.RequireAnyRole("operator", "release_manager", "admin"), deps.DNSBindingHandler.Bind)
+			domains.GET("/:id/dns-binding", middleware.RequireAnyRole("viewer", "operator", "release_manager", "admin", "auditor"), deps.DNSBindingHandler.GetStatus)
+			domains.POST("/:id/dns-binding/verify", middleware.RequireAnyRole("operator", "release_manager", "admin"), deps.DNSBindingHandler.TriggerVerify)
+			// DNS record CRUD with local snapshot (B.3)
+			domains.POST("/:id/dns-records/sync", middleware.RequireDNSPermission(deps.PermissionChecker, "editor"), deps.DNSRecordSyncHandler.Sync)
+			domains.GET("/:id/dns-records/local", middleware.RequireDNSPermission(deps.PermissionChecker, "viewer"), deps.DNSRecordSyncHandler.ListLocal)
+			domains.POST("/:id/dns-records/local", middleware.RequireDNSPermission(deps.PermissionChecker, "editor"), deps.DNSRecordSyncHandler.CreateLocal)
+			domains.PUT("/:id/dns-records/local/:rid", middleware.RequireDNSPermission(deps.PermissionChecker, "editor"), deps.DNSRecordSyncHandler.UpdateLocal)
+			domains.DELETE("/:id/dns-records/local/:rid", middleware.RequireDNSPermission(deps.PermissionChecker, "editor"), deps.DNSRecordSyncHandler.DeleteLocal)
+			domains.POST("/:id/dns-records/local/batch-delete", middleware.RequireDNSPermission(deps.PermissionChecker, "editor"), deps.DNSRecordSyncHandler.BatchDeleteLocal)
+			domains.POST("/:id/dns-records/apply-template", middleware.RequireDNSPermission(deps.PermissionChecker, "editor"), deps.DNSRecordSyncHandler.ApplyTemplate)
 			// DNS record management via provider API (zone-level RBAC)
 			domains.GET("/:id/provider-records", middleware.RequireDNSPermission(deps.PermissionChecker, "viewer"), deps.DNSRecordHandler.ListRecords)
 			domains.POST("/:id/provider-records", middleware.RequireDNSPermission(deps.PermissionChecker, "editor"), deps.DNSRecordHandler.CreateRecord)
@@ -242,6 +257,15 @@ func RegisterV1(r *gin.Engine, deps Deps) {
 		domains.POST("/:id/ssl-certs", middleware.RequireAnyRole("operator", "release_manager", "admin"), deps.SSLHandler.Create)
 		domains.GET("/:id/ssl-certs", middleware.RequireAnyRole("viewer", "operator", "release_manager", "admin", "auditor"), deps.SSLHandler.List)
 		domains.POST("/:id/ssl-certs/check", middleware.RequireAnyRole("operator", "release_manager", "admin"), deps.SSLHandler.Check)
+
+			// ── CDN domain binding (C.2) ──────────────────────────────────
+			if deps.CDNBindingHandler != nil {
+				domains.POST("/:id/cdn-bindings", middleware.RequireAnyRole("operator", "release_manager", "admin"), deps.CDNBindingHandler.Bind)
+				domains.GET("/:id/cdn-bindings", middleware.RequireAnyRole("viewer", "operator", "release_manager", "admin", "auditor"), deps.CDNBindingHandler.ListBindings)
+				domains.GET("/:id/cdn-bindings/:bid", middleware.RequireAnyRole("viewer", "operator", "release_manager", "admin", "auditor"), deps.CDNBindingHandler.GetBinding)
+				domains.DELETE("/:id/cdn-bindings/:bid", middleware.RequireAnyRole("operator", "release_manager", "admin"), deps.CDNBindingHandler.Unbind)
+				domains.POST("/:id/cdn-bindings/:bid/refresh", middleware.RequireAnyRole("operator", "release_manager", "admin"), deps.CDNBindingHandler.RefreshStatus)
+			}
 
 		// ── DNS Record Templates ───────────────────────────────────────
 		dnsTemplates := authed.Group("/dns-templates")
