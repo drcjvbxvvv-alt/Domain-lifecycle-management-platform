@@ -428,10 +428,19 @@ func (h *RegistrarHandler) SyncAccount(c *gin.Context) {
 		})
 		return
 	}
+	if errors.Is(err, registrar.ErrAccessDenied) {
+		c.JSON(http.StatusForbidden, gin.H{
+			"code": 40300, "data": nil,
+			"message": "此 GoDaddy 帳號沒有 API 存取權限（ACCESS_DENIED）。" +
+				"GoDaddy 自 2023 年起限制一般零售帳號使用 Production API。" +
+				"可改用 OTE 沙盒測試，或聯絡 GoDaddy 確認帳號是否具備 API 存取資格（Reseller / Partner 帳號）。",
+		})
+		return
+	}
 	if errors.Is(err, registrar.ErrCredentialsRejected) {
 		c.JSON(http.StatusUnprocessableEntity, gin.H{
 			"code": 42201, "data": nil,
-			"message": "registrar API credentials rejected — verify your Key and Secret at developer.godaddy.com/keys, then update them via 設定憑證",
+			"message": "GoDaddy API Key / Secret 驗證失敗，請至 developer.godaddy.com/keys 確認憑證正確，並在「設定憑證」重新輸入。",
 		})
 		return
 	}

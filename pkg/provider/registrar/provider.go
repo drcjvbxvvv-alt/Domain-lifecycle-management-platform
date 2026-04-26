@@ -29,7 +29,10 @@ var (
 	ErrMissingCredentials    = errors.New("registrar credentials missing or invalid")
 	ErrDomainNotFound        = errors.New("domain not found in registrar")
 	ErrRateLimitExceeded     = errors.New("registrar API rate limit exceeded")
-	ErrUnauthorized          = errors.New("registrar API credentials rejected")
+	ErrUnauthorized          = errors.New("registrar API credentials rejected — check your Key and Secret")
+	// ErrAccessDenied is returned when credentials are valid but the account
+	// does not have API access (e.g. GoDaddy retail accounts after 2023).
+	ErrAccessDenied = errors.New("registrar API access denied — account does not have API permission")
 )
 
 // ── DomainInfo ─────────────────────────────────────────────────────────────────

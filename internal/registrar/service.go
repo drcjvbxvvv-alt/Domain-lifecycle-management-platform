@@ -26,6 +26,9 @@ var (
 	ErrCredentialsMissing   = errors.New("registrar account credentials are missing or invalid")
 	ErrProviderNotSupported = errors.New("registrar api_type is not supported")
 	ErrRateLimitExceeded    = errors.New("registrar API rate limit exceeded")
+	// ErrAccessDenied means credentials are valid but the account lacks API permission.
+	// Common for GoDaddy retail accounts (non-reseller) on the Production API.
+	ErrAccessDenied = errors.New("registrar API access denied — account does not have API permission")
 )
 
 // domainDateUpdater is the subset of DomainStore used by SyncAccount.
@@ -351,8 +354,11 @@ func (s *Service) SyncAccount(ctx context.Context, accountID int64) (*SyncResult
 	// 3. Fetch domain list from registrar.
 	domains, err := provider.ListDomains(ctx)
 	if err != nil {
+		if errors.Is(err, registrarprovider.ErrAccessDenied) {
+			return nil, fmt.Errorf("%w", ErrAccessDenied)
+		}
 		if errors.Is(err, registrarprovider.ErrUnauthorized) {
-			return nil, ErrCredentialsRejected
+			return nil, fmt.Errorf("%w", ErrCredentialsRejected)
 		}
 		if errors.Is(err, registrarprovider.ErrMissingCredentials) {
 			return nil, ErrCredentialsMissing

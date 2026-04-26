@@ -194,23 +194,40 @@ func toDomainInfo(d goDaddyDomainItem) DomainInfo {
 	return info
 }
 
+// godaddyErrBody is the JSON shape GoDaddy returns for API errors.
+type godaddyErrBody struct {
+	Code    string `json:"code"`
+	Message string `json:"message"`
+}
+
 // checkStatus maps GoDaddy HTTP status codes to typed errors.
+// For 401/403 it parses GoDaddy's JSON body to distinguish between
+// wrong credentials (UNABLE_TO_AUTHENTICATE) and account-level access
+// restrictions (ACCESS_DENIED — common for retail accounts after 2023).
 func checkStatus(code int, body []byte) error {
 	switch code {
 	case http.StatusOK:
 		return nil
 	case http.StatusUnauthorized, http.StatusForbidden:
-		return ErrUnauthorized
+		var apiErr godaddyErrBody
+		_ = json.Unmarshal(body, &apiErr)
+		if apiErr.Code == "ACCESS_DENIED" {
+			return fmt.Errorf("%w: %s", ErrAccessDenied, apiErr.Message)
+		}
+		detail := truncate(string(body), 300)
+		return fmt.Errorf("%w: %s", ErrUnauthorized, detail)
 	case http.StatusNotFound:
 		return ErrDomainNotFound
 	case http.StatusTooManyRequests:
 		return ErrRateLimitExceeded
 	default:
-		// Truncate body for safety
-		msg := string(body)
-		if len(msg) > 200 {
-			msg = msg[:200] + "…"
-		}
-		return fmt.Errorf("godaddy API error %d: %s", code, msg)
+		return fmt.Errorf("godaddy API error %d: %s", code, truncate(string(body), 200))
 	}
+}
+
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "…"
 }
