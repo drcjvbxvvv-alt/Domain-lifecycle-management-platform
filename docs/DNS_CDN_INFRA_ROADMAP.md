@@ -107,7 +107,7 @@ web/src/views/
 
 ```
 Phase A（DNS Provider 能力建設）
-├── A.1  DNS Provider 介面擴充（Record CRUD 方法）
+├── A.1  DNS Provider 介面擴充（Record CRUD 方法）  ✅ (完成)
 ├── A.2  Cloudflare DNS Record CRUD        [depends: A.1]
 ├── A.3  阿里雲 DNS (ALIDNS) Record CRUD   [depends: A.1]
 ├── A.4  騰訊雲 DNSPod Record CRUD         [depends: A.1]
@@ -164,7 +164,7 @@ Phase D（端對端驗證）             [depends: B + C]
 
 ## Phase A — DNS Provider 能力建設
 
-### A.1 DNS Provider 介面擴充
+### A.1 DNS Provider 介面擴充 ✅ (完成)
 
 **目標**：在現有 `pkg/provider/dns/provider.go` 的 `Provider` 介面中加入完整的記錄 CRUD 方法。
 

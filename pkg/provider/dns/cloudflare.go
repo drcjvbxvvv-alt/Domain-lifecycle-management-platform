@@ -35,6 +35,7 @@ const cloudflareBaseURL = "https://api.cloudflare.com/client/v4"
 type cloudflareProvider struct {
 	zoneID   string
 	apiToken string
+	baseURL  string // injectable for tests; defaults to cloudflareBaseURL
 	client   *http.Client
 }
 
@@ -52,8 +53,20 @@ func NewCloudflareProvider(config, credentials json.RawMessage) (Provider, error
 	return &cloudflareProvider{
 		zoneID:   cfg.ZoneID,
 		apiToken: creds.APIToken,
+		baseURL:  cloudflareBaseURL,
 		client:   &http.Client{Timeout: 15 * time.Second},
 	}, nil
+}
+
+// newCloudflareProviderWithClient allows injecting a custom HTTP client and base
+// URL. Used in tests to point at an httptest.Server instead of the real API.
+func newCloudflareProviderWithClient(zoneID, apiToken, baseURL string, client *http.Client) Provider {
+	return &cloudflareProvider{
+		zoneID:   zoneID,
+		apiToken: apiToken,
+		baseURL:  baseURL,
+		client:   client,
+	}
 }
 
 func (p *cloudflareProvider) Name() string { return "cloudflare" }
@@ -87,7 +100,7 @@ func (p *cloudflareProvider) ListRecords(ctx context.Context, zone string, filte
 		zone = p.zoneID
 	}
 
-	url := fmt.Sprintf("%s/zones/%s/dns_records?per_page=500", cloudflareBaseURL, zone)
+	url := fmt.Sprintf("%s/zones/%s/dns_records?per_page=500", p.baseURL, zone)
 	if filter.Name != "" {
 		url += "&name=" + filter.Name
 	}
@@ -161,7 +174,7 @@ func (p *cloudflareProvider) CreateRecord(ctx context.Context, zone string, reco
 	}
 	data, _ := json.Marshal(payload)
 
-	url := fmt.Sprintf("%s/zones/%s/dns_records", cloudflareBaseURL, zone)
+	url := fmt.Sprintf("%s/zones/%s/dns_records", p.baseURL, zone)
 	body, err := p.doPost(ctx, url, data)
 	if err != nil {
 		return nil, fmt.Errorf("cloudflare create record: %w", err)
@@ -206,7 +219,7 @@ func (p *cloudflareProvider) UpdateRecord(ctx context.Context, zone string, reco
 	}
 	data, _ := json.Marshal(payload)
 
-	url := fmt.Sprintf("%s/zones/%s/dns_records/%s", cloudflareBaseURL, zone, recordID)
+	url := fmt.Sprintf("%s/zones/%s/dns_records/%s", p.baseURL, zone, recordID)
 	body, err := p.doPut(ctx, url, data)
 	if err != nil {
 		return nil, fmt.Errorf("cloudflare update record: %w", err)
@@ -241,7 +254,7 @@ func (p *cloudflareProvider) DeleteRecord(ctx context.Context, zone string, reco
 		zone = p.zoneID
 	}
 
-	url := fmt.Sprintf("%s/zones/%s/dns_records/%s", cloudflareBaseURL, zone, recordID)
+	url := fmt.Sprintf("%s/zones/%s/dns_records/%s", p.baseURL, zone, recordID)
 	body, err := p.doDelete(ctx, url)
 	if err != nil {
 		return fmt.Errorf("cloudflare delete record: %w", err)
@@ -254,6 +267,78 @@ func (p *cloudflareProvider) DeleteRecord(ctx context.Context, zone string, reco
 	if !resp.Success {
 		if len(resp.Errors) > 0 {
 			return fmt.Errorf("cloudflare delete error: %s", resp.Errors[0].Message)
+		}
+	}
+	return nil
+}
+
+// ── GetNameservers ────────────────────────────────────────────────────────────
+
+// cloudflareZoneResponse holds the zone detail used to extract name_servers.
+type cloudflareZoneResponse struct {
+	Success bool              `json:"success"`
+	Errors  []cloudflareError `json:"errors"`
+	Result  struct {
+		NameServers []string `json:"name_servers"`
+	} `json:"result"`
+}
+
+// GetNameservers returns the Cloudflare-assigned authoritative nameservers for
+// the zone. These are the NS values the user must set at their domain registrar.
+func (p *cloudflareProvider) GetNameservers(ctx context.Context, zone string) ([]string, error) {
+	if zone == "" {
+		zone = p.zoneID
+	}
+
+	url := fmt.Sprintf("%s/zones/%s", p.baseURL, zone)
+	body, err := p.doGet(ctx, url)
+	if err != nil {
+		return nil, fmt.Errorf("cloudflare get zone: %w", err)
+	}
+
+	var resp cloudflareZoneResponse
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return nil, fmt.Errorf("cloudflare parse zone response: %w", err)
+	}
+	if !resp.Success {
+		if len(resp.Errors) > 0 {
+			return nil, fmt.Errorf("cloudflare get zone error: %s", resp.Errors[0].Message)
+		}
+		return nil, fmt.Errorf("cloudflare get zone returned success=false")
+	}
+	if len(resp.Result.NameServers) == 0 {
+		return nil, fmt.Errorf("%w: no nameservers returned for zone %s", ErrZoneNotFound, zone)
+	}
+	return resp.Result.NameServers, nil
+}
+
+// ── BatchCreateRecords ────────────────────────────────────────────────────────
+
+// BatchCreateRecords creates multiple DNS records sequentially.
+// Cloudflare does not provide a batch creation API, so this loops over
+// CreateRecord. On the first failure, it returns the successfully created
+// records so far along with the error, allowing callers to roll back if needed.
+func (p *cloudflareProvider) BatchCreateRecords(ctx context.Context, zone string, records []Record) ([]Record, error) {
+	created := make([]Record, 0, len(records))
+	for _, rec := range records {
+		r, err := p.CreateRecord(ctx, zone, rec)
+		if err != nil {
+			return created, fmt.Errorf("batch create %s %s: %w", rec.Type, rec.Name, err)
+		}
+		created = append(created, *r)
+	}
+	return created, nil
+}
+
+// ── BatchDeleteRecords ────────────────────────────────────────────────────────
+
+// BatchDeleteRecords deletes multiple DNS records by their IDs sequentially.
+// On the first failure, returns the error immediately (already-deleted records
+// are not re-created — callers are responsible for any rollback).
+func (p *cloudflareProvider) BatchDeleteRecords(ctx context.Context, zone string, recordIDs []string) error {
+	for _, id := range recordIDs {
+		if err := p.DeleteRecord(ctx, zone, id); err != nil {
+			return fmt.Errorf("batch delete record %s: %w", id, err)
 		}
 	}
 	return nil
@@ -301,9 +386,35 @@ func (p *cloudflareProvider) doRequest(ctx context.Context, method, url string, 
 		return nil, fmt.Errorf("read response body: %w", err)
 	}
 
-	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(data))
+	if err := cfCheckStatus(resp.StatusCode, data); err != nil {
+		return nil, err
 	}
-
 	return data, nil
+}
+
+// cfCheckStatus maps Cloudflare HTTP status codes to typed sentinel errors.
+func cfCheckStatus(code int, body []byte) error {
+	switch {
+	case code < 400:
+		return nil
+	case code == http.StatusUnauthorized || code == http.StatusForbidden:
+		return ErrUnauthorized
+	case code == http.StatusNotFound:
+		return ErrRecordNotFound
+	case code == http.StatusTooManyRequests:
+		return ErrRateLimitExceeded
+	default:
+		// Try to surface the Cloudflare JSON error message for better diagnostics.
+		var errBody struct {
+			Errors []cloudflareError `json:"errors"`
+		}
+		if json.Unmarshal(body, &errBody) == nil && len(errBody.Errors) > 0 {
+			return fmt.Errorf("cloudflare error %d: %s", errBody.Errors[0].Code, errBody.Errors[0].Message)
+		}
+		msg := string(body)
+		if len(msg) > 200 {
+			msg = msg[:200] + "…"
+		}
+		return fmt.Errorf("cloudflare HTTP %d: %s", code, msg)
+	}
 }

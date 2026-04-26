@@ -27,19 +27,39 @@ var (
 	ErrMissingConfig         = errors.New("dns provider config missing or invalid")
 	ErrZoneNotFound          = errors.New("dns zone not found")
 	ErrRecordNotFound        = errors.New("dns record not found")
+	ErrRecordAlreadyExists   = errors.New("dns record already exists")
+	ErrRateLimitExceeded     = errors.New("dns provider API rate limit exceeded")
+	ErrUnauthorized          = errors.New("dns provider API credentials rejected")
+)
+
+// ── Record types ──────────────────────────────────────────────────────────────
+
+// Standard DNS record type identifiers.
+// Use these constants instead of raw strings to avoid typos.
+const (
+	RecordTypeA     = "A"
+	RecordTypeAAAA  = "AAAA"
+	RecordTypeCNAME = "CNAME"
+	RecordTypeTXT   = "TXT"
+	RecordTypeMX    = "MX"
+	RecordTypeNS    = "NS"
+	RecordTypeSRV   = "SRV"
+	RecordTypeCAA   = "CAA"
+	RecordTypePTR   = "PTR"
 )
 
 // ── Record ────────────────────────────────────────────────────────────────────
 
 // Record represents a single DNS record as stored by a DNS provider.
 type Record struct {
-	ID       string `json:"id"`                 // provider-specific record ID
-	Type     string `json:"type"`               // A, AAAA, CNAME, MX, TXT, etc.
-	Name     string `json:"name"`               // full record name (e.g. "shop.example.com")
-	Content  string `json:"content"`            // record value
-	TTL      int    `json:"ttl"`                // seconds; 1 = automatic (Cloudflare)
-	Priority int    `json:"priority,omitempty"` // MX, SRV
-	Proxied  bool   `json:"proxied,omitempty"`  // Cloudflare-specific
+	ID       string            `json:"id"`                 // provider-specific record ID
+	Type     string            `json:"type"`               // A, AAAA, CNAME, MX, TXT, etc.
+	Name     string            `json:"name"`               // full record name (e.g. "shop.example.com")
+	Content  string            `json:"content"`            // record value
+	TTL      int               `json:"ttl"`                // seconds; 1 = automatic (Cloudflare)
+	Priority int               `json:"priority,omitempty"` // MX, SRV
+	Proxied  bool              `json:"proxied,omitempty"`  // Cloudflare orange-cloud proxy
+	Extra    map[string]string `json:"extra,omitempty"`    // provider-specific fields (e.g. SRV weight/port)
 }
 
 // RecordFilter limits which records are returned by ListRecords.
@@ -51,22 +71,50 @@ type RecordFilter struct {
 // ── Provider interface ────────────────────────────────────────────────────────
 
 // Provider is the abstraction for a DNS hosting provider's API.
+//
+// Implementations must be safe for concurrent use. All methods accept a
+// context for cancellation and timeout control.
+//
+// The zone parameter is provider-specific:
+//   - Cloudflare: zone ID (from the Cloudflare dashboard)
+//   - Aliyun DNS: domain name (e.g. "example.com")
+//   - Tencent DNSPod: domain name
+//   - Huawei Cloud DNS: zone ID
+//
+// When zone is empty, implementations should fall back to the zone
+// configured in their credentials/config (if applicable).
 type Provider interface {
 	// Name returns the provider type identifier (e.g. "cloudflare").
 	Name() string
 
 	// ListRecords returns all DNS records matching the filter.
-	// zone is provider-specific (e.g. Cloudflare zone ID, Route53 hosted zone ID).
 	ListRecords(ctx context.Context, zone string, filter RecordFilter) ([]Record, error)
 
 	// CreateRecord creates a new DNS record in the zone.
+	// Returns ErrRecordAlreadyExists if a conflicting record exists.
 	CreateRecord(ctx context.Context, zone string, record Record) (*Record, error)
 
-	// UpdateRecord updates an existing DNS record by its provider-specific ID.
+	// UpdateRecord replaces an existing DNS record by its provider-specific ID.
+	// This is a full replacement (PUT semantics), not a partial update.
 	UpdateRecord(ctx context.Context, zone string, recordID string, record Record) (*Record, error)
 
 	// DeleteRecord removes a DNS record by its provider-specific ID.
+	// Returns ErrRecordNotFound if the record does not exist.
 	DeleteRecord(ctx context.Context, zone string, recordID string) error
+
+	// GetNameservers returns the authoritative nameservers for the zone.
+	// These are the NS values the user must configure at their domain registrar.
+	// Returns ErrZoneNotFound if the zone does not exist in this account.
+	GetNameservers(ctx context.Context, zone string) ([]string, error)
+
+	// BatchCreateRecords creates multiple DNS records in a single logical
+	// operation. Implementations may use a provider batch API or loop internally.
+	// On partial failure, returns the records created so far plus the error.
+	BatchCreateRecords(ctx context.Context, zone string, records []Record) ([]Record, error)
+
+	// BatchDeleteRecords deletes multiple DNS records by their provider-specific
+	// IDs. On partial failure, returns the error for the first failed deletion.
+	BatchDeleteRecords(ctx context.Context, zone string, recordIDs []string) error
 }
 
 // ── Factory ───────────────────────────────────────────────────────────────────
