@@ -16,12 +16,15 @@ import DomainPermissions from '@/views/domains/DomainPermissions.vue'
 import { useDomainStore } from '@/stores/domain'
 import { useRegistrarStore } from '@/stores/registrar'
 import { useDNSProviderStore } from '@/stores/dnsprovider'
+import { useCDNStore } from '@/stores/cdn'
 import { useSSLStore } from '@/stores/ssl'
 import { useCostStore } from '@/stores/cost'
 import { useTagStore } from '@/stores/tag'
 import { domainApi } from '@/api/domain'
 import { dnsApi } from '@/api/dns'
 import { permissionApi } from '@/api/permission'
+import { gfwApi } from '@/api/gfw'
+import type { DomainBlockingTimeline, GFWVerdict } from '@/api/gfw'
 import type { DomainPermissionLevel } from '@/types/permission'
 import { useAuthStore } from '@/stores/auth'
 import type { DomainLifecycleHistoryEntry, UpdateDomainAssetRequest } from '@/types/domain'
@@ -35,6 +38,7 @@ const route    = useRoute()
 const store    = useDomainStore()
 const regStore = useRegistrarStore()
 const dnsStore = useDNSProviderStore()
+const cdnStore = useCDNStore()
 const sslStore  = useSSLStore()
 const costStore = useCostStore()
 const tagStore  = useTagStore()
@@ -124,14 +128,17 @@ const showEdit  = ref(false)
 const saving    = ref(false)
 
 interface EditForm extends UpdateDomainAssetRequest {
-  expiry_ts:        number | null
-  registration_ts:  number | null
-  _selectedRegistrar: number | null
+  expiry_ts:           number | null
+  registration_ts:     number | null
+  _selectedRegistrar:  number | null
+  _originIpsText:      string  // comma-separated input for origin_ips
 }
 
 const editForm = ref<EditForm>({
   registrar_account_id: null,
   dns_provider_id:      null,
+  cdn_account_id:       null,
+  origin_ips:           [],
   auto_renew:           false,
   transfer_lock:        false,
   dnssec_enabled:       false,
@@ -145,11 +152,15 @@ const editForm = ref<EditForm>({
   expiry_ts:            null,
   registration_ts:      null,
   _selectedRegistrar:   null,
+  _originIpsText:       '',
 })
 
 const accountOptions  = ref<SelectOption[]>([])
 const registrarOptions = computed(() => regStore.registrars.map(r => ({ label: r.name, value: r.id })))
 const dnsOptions      = computed(() => dnsStore.providers.map(p => ({ label: p.name, value: p.id })))
+const cdnAccountOptions = computed(() =>
+  cdnStore.allAccounts.map(a => ({ label: `${a.account_name}`, value: a.id }))
+)
 
 async function onEditRegistrarChange(rid: number | null) {
   accountOptions.value = []
@@ -164,6 +175,8 @@ function openEdit() {
   editForm.value = {
     registrar_account_id: d.registrar_account_id,
     dns_provider_id:      d.dns_provider_id,
+    cdn_account_id:       d.cdn_account_id,
+    origin_ips:           d.origin_ips ?? [],
     auto_renew:           d.auto_renew,
     transfer_lock:        d.transfer_lock,
     dnssec_enabled:       d.dnssec_enabled,
@@ -177,6 +190,7 @@ function openEdit() {
     expiry_ts:            d.expiry_date       ? new Date(d.expiry_date).getTime() : null,
     registration_ts:      d.registration_date ? new Date(d.registration_date).getTime() : null,
     _selectedRegistrar:   null,
+    _originIpsText:       (d.origin_ips ?? []).join(', '),
   }
   showEdit.value = true
 }
@@ -184,9 +198,17 @@ function openEdit() {
 async function submitEdit() {
   saving.value = true
   try {
+    // Parse origin IPs from comma-separated text input
+    const parsedOriginIPs = editForm.value._originIpsText
+      .split(',')
+      .map(s => s.trim())
+      .filter(s => s.length > 0)
+
     const payload: UpdateDomainAssetRequest = {
       registrar_account_id: editForm.value.registrar_account_id,
       dns_provider_id:      editForm.value.dns_provider_id,
+      cdn_account_id:       editForm.value.cdn_account_id,
+      origin_ips:           parsedOriginIPs,
       auto_renew:           editForm.value.auto_renew,
       transfer_lock:        editForm.value.transfer_lock,
       dnssec_enabled:       editForm.value.dnssec_enabled,
@@ -550,17 +572,80 @@ function fmtDate(s: string | null | undefined): string {
   return s ? new Date(s).toLocaleDateString('zh-TW') : '-'
 }
 
+// ── GFW blocking timeline ─────────────────────────────────────────────────────
+const gfwTimeline    = ref<DomainBlockingTimeline | null>(null)
+const gfwLoading     = ref(false)
+
+async function fetchGFWTimeline() {
+  gfwLoading.value = true
+  try {
+    const res = await gfwApi.getDomainTimeline(domainId, 50) as any
+    gfwTimeline.value = res?.data ?? null
+  } catch {
+    // Non-critical — tab shows empty state
+  } finally {
+    gfwLoading.value = false
+  }
+}
+
+function gfwBlockingLabel(v: string): string {
+  const map: Record<string, string> = {
+    '': '正常',
+    dns: 'DNS 注入',
+    tcp_ip: 'TCP/IP 封鎖',
+    tls_sni: 'TLS SNI',
+    'http-failure': 'HTTP 失敗',
+    'http-diff': 'HTTP 差異',
+    indeterminate: '不確定',
+  }
+  return map[v] ?? v
+}
+
+function gfwBlockingType(v: string): 'success' | 'error' | 'warning' | 'default' {
+  if (v === '' || v === 'accessible') return 'success'
+  if (v === 'dns' || v === 'tcp_ip') return 'error'
+  if (v === 'tls_sni' || v === 'http-failure') return 'error'
+  if (v === 'http-diff') return 'warning'
+  return 'default'
+}
+
+const gfwColumns: DataTableColumns<GFWVerdict> = [
+  {
+    title: '時間', key: 'measured_at', width: 170,
+    render: (row) => new Date(row.measured_at).toLocaleString('zh-TW'),
+  },
+  {
+    title: '狀態', key: 'blocking', width: 120,
+    render: (row) => h(NTag, { type: gfwBlockingType(row.blocking), size: 'small' },
+      { default: () => row.accessible ? '正常' : gfwBlockingLabel(row.blocking) }),
+  },
+  {
+    title: '信心值', key: 'confidence', width: 80,
+    render: (row) => `${Math.round(row.confidence * 100)}%`,
+  },
+  {
+    title: 'DNS 一致性', key: 'dns_consistency', width: 120,
+    render: (row) => row.dns_consistency ?? '-',
+  },
+  {
+    title: '探測節點', key: 'probe_node_id', ellipsis: { tooltip: true }, minWidth: 120,
+    render: (row) => row.probe_node_id || '-',
+  },
+]
+
 onMounted(async () => {
   await store.fetchOne(domainId)
   await refreshHistory()
   await Promise.all([
     regStore.fetchList(),
     dnsStore.fetchList(),
+    cdnStore.fetchAllAccounts(),
     sslStore.fetchList(domainId),
     costStore.fetchDomainCosts(domainId),
     tagStore.fetchList(),
     tagStore.fetchDomainTags(domainId),
     fetchMyPermission(),
+    fetchGFWTimeline(),
   ])
 })
 </script>
@@ -618,6 +703,11 @@ onMounted(async () => {
           <NDescriptionsItem label="DNS 解析服務">
             {{ store.current.dns_provider_id != null ? `#${store.current.dns_provider_id}` : '-' }}
           </NDescriptionsItem>
+          <NDescriptionsItem label="CDN 帳號">
+            {{ store.current.cdn_account_id != null
+              ? (cdnStore.allAccounts.find(a => a.id === store.current!.cdn_account_id)?.account_name ?? `#${store.current.cdn_account_id}`)
+              : '-' }}
+          </NDescriptionsItem>
           <NDescriptionsItem label="到期日">{{ fmtDate(store.current.expiry_date) }}</NDescriptionsItem>
           <NDescriptionsItem label="自動續約">{{ store.current.auto_renew ? '是' : '否' }}</NDescriptionsItem>
           <NDescriptionsItem label="到期狀態">{{ store.current.expiry_status ?? '-' }}</NDescriptionsItem>
@@ -656,6 +746,19 @@ onMounted(async () => {
                 <NDescriptionsItem label="WHOIS 隱私">{{ store.current.whois_privacy ? '啟用' : '停用' }}</NDescriptionsItem>
               </NDescriptions>
 
+              <div class="section-title">CDN 與源站</div>
+              <NDescriptions bordered :column="2">
+                <NDescriptionsItem label="CDN 帳號">
+                  {{ store.current.cdn_account_id != null
+                    ? (cdnStore.allAccounts.find(a => a.id === store.current!.cdn_account_id)?.account_name ?? `#${store.current.cdn_account_id}`)
+                    : '-' }}
+                </NDescriptionsItem>
+                <NDescriptionsItem label="源站 IP">
+                  {{ (store.current.origin_ips ?? []).length > 0 ? store.current.origin_ips.join(', ') : '-' }}
+                </NDescriptionsItem>
+                <NDescriptionsItem label="用途" :span="2">{{ store.current.purpose ?? '-' }}</NDescriptionsItem>
+              </NDescriptions>
+
               <div class="section-title">財務</div>
               <NDescriptions bordered :column="2">
                 <NDescriptionsItem label="年費">
@@ -665,7 +768,6 @@ onMounted(async () => {
                   {{ store.current.purchase_price != null ? `${store.current.purchase_price} ${store.current.currency ?? ''}` : '-' }}
                 </NDescriptionsItem>
                 <NDescriptionsItem label="費用固定">{{ store.current.fee_fixed ? '是' : '否' }}</NDescriptionsItem>
-                <NDescriptionsItem label="用途">{{ store.current.purpose ?? '-' }}</NDescriptionsItem>
                 <NDescriptionsItem label="備注" :span="2">{{ store.current.notes ?? '-' }}</NDescriptionsItem>
               </NDescriptions>
             </div>
@@ -964,6 +1066,66 @@ onMounted(async () => {
             </div>
           </NTabPane>
 
+          <!-- GFW tab -->
+          <NTabPane name="gfw" tab="GFW 監控">
+            <div class="tab-section">
+              <NSpin :show="gfwLoading">
+                <!-- Current state -->
+                <div v-if="gfwTimeline?.blocking_state?.blocking_status" class="section-title" style="margin-bottom:8px">
+                  當前封鎖狀態
+                </div>
+                <NDescriptions
+                  v-if="gfwTimeline?.blocking_state"
+                  bordered
+                  :column="2"
+                  size="small"
+                  style="margin-bottom:16px"
+                >
+                  <NDescriptionsItem label="封鎖狀態">
+                    <NTag
+                      :type="gfwTimeline.blocking_state.blocking_status === 'blocked' ? 'error'
+                           : gfwTimeline.blocking_state.blocking_status === 'possibly_blocked' ? 'warning'
+                           : 'success'"
+                      size="small"
+                    >
+                      {{ gfwTimeline.blocking_state.blocking_status === 'blocked'          ? '已封鎖'
+                       : gfwTimeline.blocking_state.blocking_status === 'possibly_blocked' ? '可能封鎖'
+                       : '正常' }}
+                    </NTag>
+                  </NDescriptionsItem>
+                  <NDescriptionsItem label="封鎖類型">
+                    {{ gfwTimeline.blocking_state.blocking_type ?? '-' }}
+                  </NDescriptionsItem>
+                  <NDescriptionsItem label="信心值">
+                    {{ gfwTimeline.blocking_state.blocking_confidence != null
+                         ? `${Math.round(gfwTimeline.blocking_state.blocking_confidence * 100)}%`
+                         : '-' }}
+                  </NDescriptionsItem>
+                  <NDescriptionsItem label="封鎖起始">
+                    {{ fmtDate(gfwTimeline.blocking_state.blocking_since) }}
+                  </NDescriptionsItem>
+                </NDescriptions>
+
+                <div v-if="!gfwTimeline || !gfwTimeline.verdicts.length" class="empty-hint">
+                  暫無 GFW 偵測記錄
+                </div>
+
+                <!-- Verdict timeline -->
+                <template v-else>
+                  <div class="section-title" style="margin-bottom:8px">偵測歷史（最近 50 筆）</div>
+                  <NDataTable
+                    :columns="gfwColumns"
+                    :data="gfwTimeline.verdicts"
+                    :bordered="false"
+                    size="small"
+                    :max-height="360"
+                    :scroll-x="680"
+                  />
+                </template>
+              </NSpin>
+            </div>
+          </NTabPane>
+
           <!-- History tab -->
           <NTabPane name="history" :tab="`狀態歷史 (${history.length})`">
             <NTimeline class="history-timeline">
@@ -1024,6 +1186,21 @@ onMounted(async () => {
             v-model:value="(editForm as any).dns_provider_id"
             :options="dnsOptions"
             placeholder="選擇 DNS 解析服務"
+            clearable
+          />
+        </NFormItem>
+        <NFormItem label="CDN 帳號">
+          <NSelect
+            v-model:value="(editForm as any).cdn_account_id"
+            :options="cdnAccountOptions"
+            placeholder="選擇 CDN 帳號（選填）"
+            clearable
+          />
+        </NFormItem>
+        <NFormItem label="源站 IP">
+          <NInput
+            v-model:value="(editForm as any)._originIpsText"
+            placeholder="多個 IP 以逗號分隔，例：1.2.3.4, 5.6.7.8"
             clearable
           />
         </NFormItem>

@@ -18,14 +18,30 @@ import (
 // ProbeNodeHandler implements the probe protocol endpoints (/probe/v1/*)
 // and the GFW admin management endpoints (/api/v1/gfw/*).
 type ProbeNodeHandler struct {
-	svc     *gfw.NodeService
-	msvc    *gfw.MeasurementService
-	store   *postgres.GFWNodeStore
-	logger  *zap.Logger
+	svc          *gfw.NodeService
+	msvc         *gfw.MeasurementService
+	vsvc         *gfw.VerdictService
+	store        *postgres.GFWNodeStore
+	blockStore   *postgres.GFWBlockingStore
+	logger       *zap.Logger
 }
 
-func NewProbeNodeHandler(svc *gfw.NodeService, msvc *gfw.MeasurementService, store *postgres.GFWNodeStore, logger *zap.Logger) *ProbeNodeHandler {
-	return &ProbeNodeHandler{svc: svc, msvc: msvc, store: store, logger: logger}
+func NewProbeNodeHandler(
+	svc *gfw.NodeService,
+	msvc *gfw.MeasurementService,
+	vsvc *gfw.VerdictService,
+	store *postgres.GFWNodeStore,
+	blockStore *postgres.GFWBlockingStore,
+	logger *zap.Logger,
+) *ProbeNodeHandler {
+	return &ProbeNodeHandler{
+		svc:        svc,
+		msvc:       msvc,
+		vsvc:       vsvc,
+		store:      store,
+		blockStore: blockStore,
+		logger:     logger,
+	}
 }
 
 // ── Probe protocol endpoints (/probe/v1/*) ────────────────────────────────────
@@ -430,6 +446,178 @@ func (h *ProbeNodeHandler) DeleteAssignment(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusNoContent, nil)
+}
+
+// ── Verdict endpoints (/api/v1/gfw/verdicts/*) ───────────────────────────────
+
+// ListVerdicts handles GET /api/v1/gfw/verdicts/:domainId.
+// Query param: limit (int, max 500, default 100).
+func (h *ProbeNodeHandler) ListVerdicts(c *gin.Context) {
+	domainID, err := strconv.ParseInt(c.Param("domainId"), 10, 64)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"code": 40000, "data": nil, "message": "invalid domain_id",
+		})
+		return
+	}
+
+	limit := 100
+	if s := c.Query("limit"); s != "" {
+		if l, err := strconv.Atoi(s); err == nil && l > 0 {
+			if l > 500 {
+				l = 500
+			}
+			limit = l
+		}
+	}
+
+	rows, err := h.vsvc.ListVerdicts(c.Request.Context(), domainID, limit)
+	if err != nil {
+		h.logger.Error("list verdicts", zap.Int64("domain_id", domainID), zap.Error(err))
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"code": 50000, "data": nil, "message": "failed to list verdicts",
+		})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"code": 0, "data": gin.H{"items": rows, "total": len(rows)}, "message": "ok"})
+}
+
+// LatestVerdict handles GET /api/v1/gfw/verdicts/:domainId/latest.
+// Returns the most recent verdict.  If no verdict exists yet, triggers
+// a fresh analysis from the latest measurements.
+func (h *ProbeNodeHandler) LatestVerdict(c *gin.Context) {
+	domainID, err := strconv.ParseInt(c.Param("domainId"), 10, 64)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"code": 40000, "data": nil, "message": "invalid domain_id",
+		})
+		return
+	}
+
+	// Try cached verdict first.
+	row, err := h.vsvc.LatestVerdict(c.Request.Context(), domainID)
+	if err != nil {
+		h.logger.Error("latest verdict", zap.Int64("domain_id", domainID), zap.Error(err))
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"code": 50000, "data": nil, "message": "failed to get latest verdict",
+		})
+		return
+	}
+
+	if row != nil {
+		c.JSON(http.StatusOK, gin.H{"code": 0, "data": row, "message": "ok"})
+		return
+	}
+
+	// No cached verdict — run fresh analysis.
+	verdict, err := h.vsvc.AnalyzeAndStore(c.Request.Context(), domainID)
+	if err != nil {
+		h.logger.Error("analyze domain", zap.Int64("domain_id", domainID), zap.Error(err))
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"code": 50000, "data": nil, "message": "failed to analyze domain",
+		})
+		return
+	}
+	if verdict == nil {
+		c.JSON(http.StatusNotFound, gin.H{
+			"code": 40400, "data": nil, "message": "no measurements available for this domain",
+		})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"code": 0, "data": verdict, "message": "ok"})
+}
+
+// ActivelyBlockedDomains handles GET /api/v1/gfw/verdicts/blocked.
+// Returns a summary of all domains that currently have a blocking verdict.
+func (h *ProbeNodeHandler) ActivelyBlockedDomains(c *gin.Context) {
+	rows, err := h.vsvc.ActivelyBlockedDomains(c.Request.Context())
+	if err != nil {
+		h.logger.Error("actively blocked domains", zap.Error(err))
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"code": 50000, "data": nil, "message": "failed to fetch blocked domains",
+		})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"code": 0, "data": gin.H{"items": rows, "total": len(rows)}, "message": "ok"})
+}
+
+// ── GFW dashboard endpoints (/api/v1/gfw/dashboard/*) ────────────────────────
+
+// ListBlockedDomains handles GET /api/v1/gfw/blocked-domains.
+// Returns all domains with a non-null blocking_status from the denormalized
+// domains table, ordered by confidence descending.
+func (h *ProbeNodeHandler) ListBlockedDomains(c *gin.Context) {
+	rows, err := h.blockStore.ListBlockedDomains(c.Request.Context())
+	if err != nil {
+		h.logger.Error("list blocked domains", zap.Error(err))
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"code": 50000, "data": nil, "message": "failed to list blocked domains",
+		})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"code": 0, "data": gin.H{"items": rows, "total": len(rows)}, "message": "ok"})
+}
+
+// GetGFWStats handles GET /api/v1/gfw/stats.
+// Returns aggregate counts for the GFW dashboard summary cards.
+func (h *ProbeNodeHandler) GetGFWStats(c *gin.Context) {
+	stats, err := h.blockStore.GetGFWStats(c.Request.Context())
+	if err != nil {
+		h.logger.Error("get gfw stats", zap.Error(err))
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"code": 50000, "data": nil, "message": "failed to get gfw stats",
+		})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"code": 0, "data": stats, "message": "ok"})
+}
+
+// GetDomainBlockingTimeline handles GET /api/v1/gfw/timeline/:domainId.
+// Returns verdict history for a domain (up to 200 entries) plus the current
+// denormalized blocking state.
+func (h *ProbeNodeHandler) GetDomainBlockingTimeline(c *gin.Context) {
+	domainID, err := strconv.ParseInt(c.Param("domainId"), 10, 64)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"code": 40000, "data": nil, "message": "invalid domain_id",
+		})
+		return
+	}
+
+	limit := 200
+	if s := c.Query("limit"); s != "" {
+		if l, err := strconv.Atoi(s); err == nil && l > 0 && l <= 500 {
+			limit = l
+		}
+	}
+
+	verdicts, err := h.vsvc.ListVerdicts(c.Request.Context(), domainID, limit)
+	if err != nil {
+		h.logger.Error("get domain timeline verdicts", zap.Int64("domain_id", domainID), zap.Error(err))
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"code": 50000, "data": nil, "message": "failed to get verdict timeline",
+		})
+		return
+	}
+
+	state, err := h.blockStore.GetDomainBlockingState(c.Request.Context(), domainID)
+	if err != nil {
+		h.logger.Error("get domain blocking state", zap.Int64("domain_id", domainID), zap.Error(err))
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"code": 50000, "data": nil, "message": "failed to get blocking state",
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"code": 0,
+		"data": gin.H{
+			"blocking_state": state,
+			"verdicts":       verdicts,
+			"total":          len(verdicts),
+		},
+		"message": "ok",
+	})
 }
 
 // probeErrStatus maps service errors to HTTP status + codes.

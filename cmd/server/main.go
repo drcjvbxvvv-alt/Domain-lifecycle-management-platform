@@ -23,6 +23,7 @@ import (
 	gfwsvc "domain-platform/internal/gfw"
 	probesvc "domain-platform/internal/probe"
 	"domain-platform/internal/bootstrap"
+	cdnsvc "domain-platform/internal/cdn"
 	costsvc "domain-platform/internal/cost"
 	domainsvc "domain-platform/internal/domain"
 	dnstemplateSvc "domain-platform/internal/dnstemplate"
@@ -117,6 +118,10 @@ func main() {
 	registrarSvc := registrar.NewService(registrarStore, logger)
 	registrarHandler := handler.NewRegistrarHandler(registrarSvc, logger)
 
+	cdnStore := postgres.NewCDNStore(db)
+	cdnSvc := cdnsvc.NewService(cdnStore, logger)
+	cdnHandler := handler.NewCDNHandler(cdnSvc, logger)
+
 	dnsProviderStore := postgres.NewDNSProviderStore(db)
 	dnsProviderSvc := dnsprovider.NewService(dnsProviderStore, logger)
 	dnsProviderHandler := handler.NewDNSProviderHandler(dnsProviderSvc, logger)
@@ -177,9 +182,15 @@ func main() {
 
 	gfwNodeStore := postgres.NewGFWNodeStore(db)
 	gfwMeasurementStore := postgres.NewGFWMeasurementStore(db)
+	gfwVerdictStore := postgres.NewGFWVerdictStore(db)
 	gfwNodeSvc := gfwsvc.NewNodeService(gfwNodeStore, domainStore, logger)
 	gfwMeasurementSvc := gfwsvc.NewMeasurementService(gfwMeasurementStore, gfwNodeStore, logger)
-	probeNodeHandler := handler.NewProbeNodeHandler(gfwNodeSvc, gfwMeasurementSvc, gfwNodeStore, logger)
+	gfwAnalyzer := gfwsvc.NewAnalyzer(gfwsvc.DefaultASNDatabase())
+	gfwConfidenceTracker := gfwsvc.NewRedisConfidenceTracker(rdb)
+	gfwBlockingStore := postgres.NewGFWBlockingStore(db)
+	gfwBlockingAlertSvc := gfwsvc.NewBlockingAlertService(gfwBlockingStore, alertEngine, logger)
+	gfwVerdictSvc := gfwsvc.NewVerdictService(gfwMeasurementSvc, gfwVerdictStore, gfwAnalyzer, gfwConfidenceTracker, gfwBlockingAlertSvc, logger)
+	probeNodeHandler := handler.NewProbeNodeHandler(gfwNodeSvc, gfwMeasurementSvc, gfwVerdictSvc, gfwNodeStore, gfwBlockingStore, logger)
 
 	// ── Management API listener (:8080, JWT auth) ──────────────────────────
 	mgmtRouter := buildManagementRouter(logger, router.Deps{
@@ -209,6 +220,7 @@ func main() {
 		MaintenanceHandler:      maintenanceHandler,
 		StatusPageHandler:       statusPageHandler,
 		UptimeHandler:           uptimeHandler,
+		CDNHandler:              cdnHandler,
 		ProbeNodeHandler:        probeNodeHandler,
 		JWTManager:              jwtMgr,
 	})

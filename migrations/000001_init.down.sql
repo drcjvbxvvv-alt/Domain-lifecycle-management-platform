@@ -35,6 +35,8 @@ DROP TABLE IF EXISTS domain_lifecycle_history CASCADE;
 DROP TABLE IF EXISTS domain_variables      CASCADE;
 DROP TABLE IF EXISTS domains               CASCADE;
 DROP TABLE IF EXISTS dns_providers          CASCADE;
+DROP TABLE IF EXISTS cdn_accounts          CASCADE;
+DROP TABLE IF EXISTS cdn_providers         CASCADE;
 DROP TABLE IF EXISTS registrar_accounts    CASCADE;
 DROP TABLE IF EXISTS registrars            CASCADE;
 DROP TABLE IF EXISTS projects              CASCADE;

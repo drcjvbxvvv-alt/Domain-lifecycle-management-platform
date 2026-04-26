@@ -171,6 +171,20 @@ const router = createRouter({
           meta: { title: 'DNS Provider 詳情', minRole: 'viewer' },
         },
 
+        // ── CDN Providers ─────────────────────────────────────
+        {
+          path: 'cdn-providers',
+          name: 'CDNProviderList',
+          component: () => import('@/views/cdn-providers/CDNProviderList.vue'),
+          meta: { title: 'CDN 供應商管理', minRole: 'viewer' },
+        },
+        {
+          path: 'cdn-providers/:id',
+          name: 'CDNProviderDetail',
+          component: () => import('@/views/cdn-providers/CDNProviderDetail.vue'),
+          meta: { title: 'CDN 供應商詳情', minRole: 'viewer' },
+        },
+
         // ── Settings ──────────────────────────────────────────
         {
           path: 'settings/users',
@@ -245,6 +259,14 @@ const router = createRouter({
           name: 'UptimeDashboard',
           component: () => import('@/views/uptime/UptimeDashboard.vue'),
           meta: { title: '可用性儀表板', minRole: 'viewer' },
+        },
+
+        // ── GFW Monitoring (PD.4) ──────────────────────────────────
+        {
+          path: 'gfw',
+          name: 'GFWDashboard',
+          component: () => import('@/views/gfw/GFWDashboard.vue'),
+          meta: { title: 'GFW 監控', minRole: 'viewer' },
         },
       ],
     },

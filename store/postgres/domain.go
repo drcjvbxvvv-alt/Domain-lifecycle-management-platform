@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/jmoiron/sqlx"
+	"github.com/lib/pq"
 )
 
 // Domain maps to the domains table row.
@@ -21,9 +22,11 @@ type Domain struct {
 	OwnerUserID    *int64     `db:"owner_user_id"`
 
 	// Asset: Registration & Provider binding
-	TLD                  *string `db:"tld"`
-	RegistrarAccountID   *int64  `db:"registrar_account_id"`
-	DNSProviderID        *int64  `db:"dns_provider_id"`
+	TLD                  *string        `db:"tld"`
+	RegistrarAccountID   *int64         `db:"registrar_account_id"`
+	DNSProviderID        *int64         `db:"dns_provider_id"`
+	CDNAccountID         *int64         `db:"cdn_account_id"`
+	OriginIPs            pq.StringArray `db:"origin_ips"`
 
 	// Asset: Dates & Expiry
 	RegistrationDate *time.Time `db:"registration_date"`
@@ -86,7 +89,7 @@ func NewDomainStore(db *sqlx.DB) *DomainStore {
 }
 
 const domainColumns = `id, uuid, project_id, fqdn, lifecycle_state, owner_user_id,
-	tld, registrar_account_id, dns_provider_id,
+	tld, registrar_account_id, dns_provider_id, cdn_account_id, origin_ips,
 	registration_date, expiry_date, auto_renew, grace_end_date, expiry_status,
 	transfer_lock, hold,
 	transfer_status, transfer_gaining_registrar, transfer_requested_at, transfer_completed_at, last_transfer_at, last_renewed_at,
@@ -94,13 +97,14 @@ const domainColumns = `id, uuid, project_id, fqdn, lifecycle_state, owner_user_i
 	whois_privacy, registrant_contact, admin_contact, tech_contact,
 	annual_cost, currency, purchase_price, fee_fixed,
 	purpose, notes, metadata,
+	last_sync_at, last_drift_at,
 	created_at, updated_at, deleted_at`
 
 // Create inserts a new domain in the initial "requested" state.
 // This is the documented exception to the Transition() rule: there is no
 // nil → requested edge, so the INSERT sets lifecycle_state directly.
 func (s *DomainStore) Create(ctx context.Context, d *Domain) (*Domain, error) {
-	// Ensure JSON array columns are never NULL (DB has NOT NULL constraint).
+	// Ensure NOT NULL array/JSONB columns are never NULL.
 	if d.Nameservers == nil {
 		d.Nameservers = json.RawMessage(`[]`)
 	}
@@ -116,12 +120,15 @@ func (s *DomainStore) Create(ctx context.Context, d *Domain) (*Domain, error) {
 	if d.Metadata == nil {
 		d.Metadata = json.RawMessage(`{}`)
 	}
+	if d.OriginIPs == nil {
+		d.OriginIPs = pq.StringArray{}
+	}
 
 	var out Domain
 	err := s.db.QueryRowxContext(ctx,
 		`INSERT INTO domains (
 			project_id, fqdn, lifecycle_state, owner_user_id,
-			tld, registrar_account_id, dns_provider_id,
+			tld, registrar_account_id, dns_provider_id, cdn_account_id, origin_ips,
 			registration_date, expiry_date, auto_renew, grace_end_date,
 			transfer_lock, hold, nameservers, dnssec_enabled,
 			whois_privacy, registrant_contact, admin_contact, tech_contact,
@@ -129,15 +136,15 @@ func (s *DomainStore) Create(ctx context.Context, d *Domain) (*Domain, error) {
 			purpose, notes, metadata
 		) VALUES (
 			$1, $2, 'requested', $3,
-			$4, $5, $6,
-			$7, $8, $9, $10,
-			$11, $12, $13, $14,
-			$15, $16, $17, $18,
-			$19, $20, $21, $22,
-			$23, $24, $25
+			$4, $5, $6, $7, $8,
+			$9, $10, $11, $12,
+			$13, $14, $15, $16,
+			$17, $18, $19, $20,
+			$21, $22, $23, $24,
+			$25, $26, $27
 		) RETURNING `+domainColumns,
 		d.ProjectID, d.FQDN, d.OwnerUserID,
-		d.TLD, d.RegistrarAccountID, d.DNSProviderID,
+		d.TLD, d.RegistrarAccountID, d.DNSProviderID, d.CDNAccountID, d.OriginIPs,
 		d.RegistrationDate, d.ExpiryDate, d.AutoRenew, d.GraceEndDate,
 		d.TransferLock, d.Hold, d.Nameservers, d.DNSSECEnabled,
 		d.WhoisPrivacy, d.RegistrantContact, d.AdminContact, d.TechContact,
@@ -261,19 +268,24 @@ func (s *DomainStore) ListActiveWithDNSProvider(ctx context.Context) ([]Domain, 
 // UpdateAssetFields updates the domain's asset-related columns.
 // Does NOT touch lifecycle_state (that goes through LifecycleStore.TransitionTx).
 func (s *DomainStore) UpdateAssetFields(ctx context.Context, d *Domain) error {
+	if d.OriginIPs == nil {
+		d.OriginIPs = pq.StringArray{}
+	}
 	_, err := s.db.ExecContext(ctx,
 		`UPDATE domains SET
 			tld = $2, registrar_account_id = $3, dns_provider_id = $4,
-			registration_date = $5, expiry_date = $6, auto_renew = $7, grace_end_date = $8,
-			transfer_lock = $9, hold = $10,
-			nameservers = $11, dnssec_enabled = $12,
-			whois_privacy = $13, registrant_contact = $14, admin_contact = $15, tech_contact = $16,
-			annual_cost = $17, currency = $18, purchase_price = $19, fee_fixed = $20,
-			purpose = $21, notes = $22, metadata = $23,
+			cdn_account_id = $5, origin_ips = $6,
+			registration_date = $7, expiry_date = $8, auto_renew = $9, grace_end_date = $10,
+			transfer_lock = $11, hold = $12,
+			nameservers = $13, dnssec_enabled = $14,
+			whois_privacy = $15, registrant_contact = $16, admin_contact = $17, tech_contact = $18,
+			annual_cost = $19, currency = $20, purchase_price = $21, fee_fixed = $22,
+			purpose = $23, notes = $24, metadata = $25,
 			updated_at = NOW()
 		WHERE id = $1 AND deleted_at IS NULL`,
 		d.ID,
 		d.TLD, d.RegistrarAccountID, d.DNSProviderID,
+		d.CDNAccountID, d.OriginIPs,
 		d.RegistrationDate, d.ExpiryDate, d.AutoRenew, d.GraceEndDate,
 		d.TransferLock, d.Hold,
 		d.Nameservers, d.DNSSECEnabled,
@@ -393,6 +405,7 @@ type ListFilter struct {
 	ProjectID      *int64
 	RegistrarID    *int64 // matches via registrar_accounts.registrar_id
 	DNSProviderID  *int64
+	CDNAccountID   *int64
 	TLD            *string
 	ExpiryStatus   *string
 	LifecycleState *string
@@ -427,6 +440,11 @@ func (s *DomainStore) ListWithFilter(ctx context.Context, f ListFilter) ([]Domai
 	if f.DNSProviderID != nil {
 		q += fmt.Sprintf(` AND d.dns_provider_id = $%d`, n)
 		args = append(args, *f.DNSProviderID)
+		n++
+	}
+	if f.CDNAccountID != nil {
+		q += fmt.Sprintf(` AND d.cdn_account_id = $%d`, n)
+		args = append(args, *f.CDNAccountID)
 		n++
 	}
 	if f.TLD != nil {
@@ -479,6 +497,11 @@ func (s *DomainStore) CountWithFilter(ctx context.Context, f ListFilter) (int64,
 	if f.DNSProviderID != nil {
 		q += fmt.Sprintf(` AND d.dns_provider_id = $%d`, n)
 		args = append(args, *f.DNSProviderID)
+		n++
+	}
+	if f.CDNAccountID != nil {
+		q += fmt.Sprintf(` AND d.cdn_account_id = $%d`, n)
+		args = append(args, *f.CDNAccountID)
 		n++
 	}
 	if f.TLD != nil {

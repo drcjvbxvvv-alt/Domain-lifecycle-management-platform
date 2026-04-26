@@ -116,6 +116,8 @@ type RegisterInput struct {
 	OwnerUserID        *int64
 	DNSProviderID      *int64
 	RegistrarAccountID *int64
+	CDNAccountID       *int64
+	OriginIPs          []string
 	RegistrationDate   *time.Time
 	ExpiryDate         *time.Time
 	AutoRenew          bool
@@ -135,6 +137,8 @@ func (s *Service) Register(ctx context.Context, in RegisterInput) (*postgres.Dom
 		OwnerUserID:        in.OwnerUserID,
 		DNSProviderID:      in.DNSProviderID,
 		RegistrarAccountID: in.RegistrarAccountID,
+		CDNAccountID:       in.CDNAccountID,
+		OriginIPs:          in.OriginIPs,
 		RegistrationDate:   in.RegistrationDate,
 		ExpiryDate:         in.ExpiryDate,
 		AutoRenew:          in.AutoRenew,
@@ -192,6 +196,7 @@ type ListInput struct {
 	ProjectID      *int64
 	RegistrarID    *int64
 	DNSProviderID  *int64
+	CDNAccountID   *int64
 	TLD            *string
 	ExpiryStatus   *string
 	LifecycleState *string
@@ -211,6 +216,7 @@ func (s *Service) List(ctx context.Context, in ListInput) (*ListResult, error) {
 		ProjectID:      in.ProjectID,
 		RegistrarID:    in.RegistrarID,
 		DNSProviderID:  in.DNSProviderID,
+		CDNAccountID:   in.CDNAccountID,
 		TLD:            in.TLD,
 		ExpiryStatus:   in.ExpiryStatus,
 		LifecycleState: in.LifecycleState,
@@ -240,6 +246,8 @@ type UpdateAssetInput struct {
 	ID                 int64
 	RegistrarAccountID *int64
 	DNSProviderID      *int64
+	CDNAccountID       *int64
+	OriginIPs          []string
 	RegistrationDate   *time.Time
 	ExpiryDate         *time.Time
 	AutoRenew          bool
@@ -268,6 +276,8 @@ func (s *Service) UpdateAsset(ctx context.Context, in UpdateAssetInput) (*postgr
 	// Apply changes
 	existing.RegistrarAccountID = in.RegistrarAccountID
 	existing.DNSProviderID = in.DNSProviderID
+	existing.CDNAccountID = in.CDNAccountID
+	existing.OriginIPs = in.OriginIPs
 	existing.RegistrationDate = in.RegistrationDate
 	existing.ExpiryDate = in.ExpiryDate
 	existing.AutoRenew = in.AutoRenew

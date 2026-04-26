@@ -126,6 +126,8 @@ CREATE TABLE domains (
     tld                     VARCHAR(64),
     registrar_account_id    BIGINT REFERENCES registrar_accounts(id),
     dns_provider_id         BIGINT REFERENCES dns_providers(id),
+    cdn_account_id          BIGINT,                        -- FK added after cdn_accounts is created (see bottom)
+    origin_ips              TEXT[] NOT NULL DEFAULT '{}',  -- origin server IPs (PE.2)
 
     -- Asset: Registration dates & Expiry
     registration_date       DATE,
@@ -189,6 +191,7 @@ CREATE INDEX idx_domains_registrar_account   ON domains (registrar_account_id) W
 CREATE INDEX idx_domains_dns_provider        ON domains (dns_provider_id) WHERE deleted_at IS NULL;
 CREATE INDEX idx_domains_expiry_date         ON domains (expiry_date) WHERE deleted_at IS NULL AND expiry_date IS NOT NULL;
 CREATE INDEX idx_domains_tld                 ON domains (tld) WHERE deleted_at IS NULL;
+-- cdn_account_id index added after FK constraint (see bottom of file)
 
 CREATE TABLE domain_variables (
     id         BIGSERIAL PRIMARY KEY,
@@ -567,7 +570,7 @@ CREATE TABLE alert_events (
     acknowledged_by   BIGINT REFERENCES users(id),
     created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     CONSTRAINT chk_alert_events_severity CHECK (severity IN ('P1', 'P2', 'P3', 'INFO')),
-    CONSTRAINT chk_alert_events_source   CHECK (source IN ('probe', 'drift', 'expiry', 'agent', 'manual', 'system'))
+    CONSTRAINT chk_alert_events_source   CHECK (source IN ('probe', 'drift', 'expiry', 'agent', 'manual', 'system', 'gfw'))
 );
 CREATE INDEX idx_alert_events_dedup       ON alert_events (dedup_key, created_at DESC);
 CREATE INDEX idx_alert_events_unresolved  ON alert_events (severity, created_at DESC) WHERE resolved_at IS NULL;
@@ -958,6 +961,49 @@ INSERT INTO gfw_bogon_ips (ip_address, source, note) VALUES
 ON CONFLICT (ip_address) DO NOTHING;
 
 -- ============================================================
+-- GFW VERDICTS                                              [PD.3]
+-- ============================================================
+-- One verdict row per (domain, probe_run) — the output of the OONI-style
+-- decision tree comparing probe vs control measurements.
+CREATE TABLE gfw_verdicts (
+    id               BIGSERIAL PRIMARY KEY,
+    domain_id        BIGINT NOT NULL REFERENCES domains(id),
+    blocking         VARCHAR(32) NOT NULL DEFAULT '',  -- '' | 'dns' | 'tcp_ip' | 'tls_sni' | 'http-failure' | 'http-diff' | 'indeterminate'
+    accessible       BOOLEAN NOT NULL,
+    dns_consistency  VARCHAR(16),                      -- 'consistent' | 'inconsistent' | NULL (no DNS data)
+    confidence       DECIMAL(3,2) NOT NULL DEFAULT 0,  -- 0.00 – 1.00
+    probe_node_id    VARCHAR(64) NOT NULL,
+    control_node_id  VARCHAR(64) NOT NULL DEFAULT '',
+    detail           JSONB,                            -- VerdictDetail: dns/tcp/tls/http per-layer evidence
+    measured_at      TIMESTAMPTZ NOT NULL,
+    created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT chk_gfw_verdicts_blocking CHECK (
+        blocking IN ('', 'dns', 'tcp_ip', 'tls_sni', 'http-failure', 'http-diff', 'indeterminate')
+    ),
+    CONSTRAINT chk_gfw_verdicts_consistency CHECK (
+        dns_consistency IS NULL OR dns_consistency IN ('consistent', 'inconsistent')
+    ),
+    CONSTRAINT chk_gfw_verdicts_confidence CHECK (confidence >= 0 AND confidence <= 1)
+);
+CREATE INDEX idx_gfw_verdicts_domain   ON gfw_verdicts(domain_id, measured_at DESC);
+CREATE INDEX idx_gfw_verdicts_blocking ON gfw_verdicts(blocking)
+    WHERE blocking != '' AND blocking != 'indeterminate';
+
+-- ============================================================
+-- GFW BLOCKING STATUS on domains                            [PD.4]
+-- ============================================================
+-- Denormalized summary updated by VerdictService on every verdict write.
+-- Allows fast queries like "list all currently blocked domains" without
+-- scanning gfw_verdicts.  The source-of-truth remains gfw_verdicts.
+ALTER TABLE domains ADD COLUMN IF NOT EXISTS blocking_status     VARCHAR(32);       -- NULL | 'possibly_blocked' | 'blocked'
+ALTER TABLE domains ADD COLUMN IF NOT EXISTS blocking_type       VARCHAR(32);       -- 'dns'|'tcp_ip'|'tls_sni'|'http-failure'|'http-diff'|'indeterminate'
+ALTER TABLE domains ADD COLUMN IF NOT EXISTS blocking_since      TIMESTAMPTZ;       -- when this blocking episode started
+ALTER TABLE domains ADD COLUMN IF NOT EXISTS blocking_confidence DECIMAL(3,2);      -- latest verdict confidence
+
+CREATE INDEX idx_domains_blocking_status ON domains(blocking_status)
+    WHERE blocking_status IS NOT NULL;
+
+-- ============================================================
 -- MAINTENANCE WINDOWS                                        [PC.4]
 -- ============================================================
 -- Planned downtime windows. While a domain is in maintenance:
@@ -1135,8 +1181,64 @@ END
 $$;
 
 -- ============================================================
+-- CDN PROVIDERS + ACCOUNTS                                  [PE.1]
+-- ============================================================
+-- CDN/加速商供應商（與 Registrar、DNS Provider 並列）
+CREATE TABLE IF NOT EXISTS cdn_providers (
+    id              BIGSERIAL PRIMARY KEY,
+    uuid            UUID NOT NULL DEFAULT gen_random_uuid(),
+    name            VARCHAR(128) NOT NULL,          -- "Cloudflare", "聚合", "網宿"
+    provider_type   VARCHAR(64)  NOT NULL,          -- "cloudflare"|"juhe"|"wangsu"|"baishan"|...
+    description     TEXT,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    deleted_at      TIMESTAMPTZ,
+    CONSTRAINT uq_cdn_providers_type_name UNIQUE (provider_type, name)
+);
+
+-- CDN 帳號（一個供應商可有多個帳號）
+CREATE TABLE IF NOT EXISTS cdn_accounts (
+    id              BIGSERIAL PRIMARY KEY,
+    uuid            UUID NOT NULL DEFAULT gen_random_uuid(),
+    cdn_provider_id BIGINT NOT NULL REFERENCES cdn_providers(id),
+    account_name    VARCHAR(128) NOT NULL,          -- "直播2", "馬甲1"
+    credentials     JSONB NOT NULL DEFAULT '{}',    -- {api_key, secret, token...}
+    notes           TEXT,
+    enabled         BOOLEAN NOT NULL DEFAULT true,
+    created_by      BIGINT REFERENCES users(id),
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    deleted_at      TIMESTAMPTZ,
+    CONSTRAINT uq_cdn_accounts_provider_name UNIQUE (cdn_provider_id, account_name)
+);
+
+CREATE INDEX IF NOT EXISTS idx_cdn_accounts_provider ON cdn_accounts(cdn_provider_id)
+    WHERE deleted_at IS NULL;
+
+-- FK from domains.cdn_account_id → cdn_accounts.id (PE.2)
+-- Added here (after cdn_accounts is created) to satisfy forward-reference constraint.
+ALTER TABLE domains
+    ADD CONSTRAINT fk_domains_cdn_account
+    FOREIGN KEY (cdn_account_id) REFERENCES cdn_accounts(id) ON DELETE SET NULL;
+
+CREATE INDEX idx_domains_cdn_account ON domains (cdn_account_id)
+    WHERE deleted_at IS NULL AND cdn_account_id IS NOT NULL;
+
+-- ============================================================
 -- SEED DATA                                                  [P1]
 -- ============================================================
+-- CDN 供應商預置清單 (PE.1)
+INSERT INTO cdn_providers (name, provider_type, description) VALUES
+    ('Cloudflare',    'cloudflare',   'Global CDN and DDoS protection'),
+    ('聚合',           'juhe',         '中國聚合 CDN 加速服務'),
+    ('網宿',           'wangsu',       '網宿科技 CDN'),
+    ('白山雲',         'baishan',      '白山雲 CDN'),
+    ('騰訊雲 CDN',     'tencent_cdn',  '騰訊雲內容分發網絡'),
+    ('華為雲 CDN',     'huawei_cdn',   '華為雲內容分發網絡'),
+    ('阿里雲 CDN',     'aliyun_cdn',   '阿里雲 CDN 加速服務'),
+    ('Fastly',        'fastly',       'Fastly edge cloud platform')
+ON CONFLICT (provider_type, name) DO NOTHING;
+
 -- Five roles per ADR-0003 D7
 INSERT INTO roles (name, description) VALUES
     ('viewer',          'Read-only access to all resources'),

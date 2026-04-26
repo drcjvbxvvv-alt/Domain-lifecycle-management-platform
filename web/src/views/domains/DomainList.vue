@@ -12,6 +12,7 @@ import { useDomainStore } from '@/stores/domain'
 import { useProjectStore } from '@/stores/project'
 import { useRegistrarStore } from '@/stores/registrar'
 import { useDNSProviderStore } from '@/stores/dnsprovider'
+import { useCDNStore } from '@/stores/cdn'
 import { useTagStore } from '@/stores/tag'
 import { tagApi } from '@/api/tag'
 import type { DomainResponse, RegisterDomainRequest } from '@/types/domain'
@@ -22,6 +23,7 @@ const store    = useDomainStore()
 const projects = useProjectStore()
 const registrars   = useRegistrarStore()
 const dnsProviders = useDNSProviderStore()
+const cdnStore     = useCDNStore()
 const tagStore     = useTagStore()
 const message      = useMessage()
 
@@ -52,12 +54,12 @@ const tagOptions = computed(() =>
 )
 
 const stateOptions: SelectOption[] = [
-  { label: 'requested',   value: 'requested'   },
-  { label: 'approved',    value: 'approved'    },
-  { label: 'provisioned', value: 'provisioned' },
-  { label: 'active',      value: 'active'      },
-  { label: 'disabled',    value: 'disabled'    },
-  { label: 'retired',     value: 'retired'     },
+  { label: '待審核',  value: 'requested'   },
+  { label: '已批准',  value: 'approved'    },
+  { label: '已佈建',  value: 'provisioned' },
+  { label: '運行中',  value: 'active'      },
+  { label: '已停用',  value: 'disabled'    },
+  { label: '已退役',  value: 'retired'     },
 ]
 
 const expiryStatusOptions: SelectOption[] = [
@@ -189,6 +191,18 @@ const columns: DataTableColumns<DomainResponse> = [
     render: (row) => h(StatusTag, { status: row.lifecycle_state }) },
   { title: 'DNS Provider', key: 'dns_provider_id', width: 140,
     render: (row) => row.dns_provider_id ? `#${row.dns_provider_id}` : '-' },
+  { title: 'CDN 帳號', key: 'cdn_account_id', width: 140,
+    render: (row): VNodeChild => {
+      if (!row.cdn_account_id) return '-'
+      const acct = cdnStore.allAccounts.find(a => a.id === row.cdn_account_id)
+      return acct ? acct.account_name : `#${row.cdn_account_id}`
+    },
+  },
+  { title: '源站 IP', key: 'origin_ips', width: 160,
+    render: (row): VNodeChild => (row.origin_ips ?? []).length > 0
+      ? (row.origin_ips as string[]).join(', ')
+      : '-',
+  },
   { title: '到期日', key: 'expiry_date', width: 120,
     render: (row): VNodeChild => {
       if (!row.expiry_date) return '-'
@@ -221,6 +235,7 @@ onMounted(async () => {
   await Promise.all([
     registrars.fetchList(),
     dnsProviders.fetchList(),
+    cdnStore.fetchAllAccounts(),
     tagStore.fetchList(),
     routeProjectId ? null : projects.fetchList(),
   ])

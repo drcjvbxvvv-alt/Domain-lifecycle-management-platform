@@ -15,6 +15,8 @@ export interface DomainResponse {
   // Provider binding
   registrar_account_id: number | null
   dns_provider_id:      number | null
+  cdn_account_id:       number | null
+  origin_ips:           string[]
 
   // Registration & expiry
   registration_date: string | null  // ISO date
@@ -69,6 +71,8 @@ export interface RegisterDomainRequest {
   fqdn:                 string
   dns_provider_id?:     number | null
   registrar_account_id?: number | null
+  cdn_account_id?:      number | null
+  origin_ips?:          string[]
   registration_date?:   string | null
   expiry_date?:         string | null
   auto_renew?:          boolean
@@ -81,6 +85,8 @@ export interface RegisterDomainRequest {
 export interface UpdateDomainAssetRequest {
   registrar_account_id?: number | null
   dns_provider_id?:      number | null
+  cdn_account_id?:       number | null
+  origin_ips?:           string[]
   registration_date?:    string | null
   expiry_date?:          string | null
   auto_renew?:           boolean

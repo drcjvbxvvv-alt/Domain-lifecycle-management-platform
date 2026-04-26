@@ -1,4 +1,4 @@
-# PHASE_D_TASKLIST.md — GFW Detection & Auto-Failover Work Order (PD.1 ✅ PD.2 ✅)
+# PHASE_D_TASKLIST.md — GFW Detection & Auto-Failover Work Order (PD.1 ✅ PD.2 ✅ PD.3 ✅ PD.4 ✅)
 
 > **Created 2026-04-21.** This document is the authoritative work order for
 > Phase D (GFW Detection) of the platform restructuring.
@@ -380,11 +380,11 @@ result storage on the control plane side.
 
 ---
 
-### PD.3 — Control vs Measurement Comparison **(Opus)**
+### PD.3 — Control vs Measurement Comparison ✅ (完成)
 
 **Owner**: **Opus** — the analysis logic that determines "blocked" vs
 "accessible" — must handle CDN variation, transient failures, and real blocking
-**Status**: 🔲 NOT STARTED
+**Status**: ✅ COMPLETED 2026-04-26
 **Depends on**: PD.2 (measurements from both probe + control nodes)
 **Reads first**: `docs/analysis/OONI_PROBE_ANALYSIS.md` §5 "Blocking Detection
 Logic" (exact decision tree)
@@ -533,7 +533,7 @@ implements the OONI-style comparison engine.
 
 **Owner**: **Opus** — alerting on blocking events triggers operational response;
 must not false-alarm but must not miss real blocks
-**Status**: 🔲 NOT STARTED
+**Status**: ✅ COMPLETED 2026-04-26
 **Depends on**: PD.3 (verdicts with confidence scoring), Phase C PC.2 (alert engine)
 **Reads first**: `CLAUDE.md` Critical Rule #8
 

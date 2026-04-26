@@ -37,6 +37,7 @@ type Deps struct {
 	MaintenanceHandler       *handler.MaintenanceHandler
 	StatusPageHandler        *handler.StatusPageHandler
 	UptimeHandler            *handler.UptimeHandler
+	CDNHandler               *handler.CDNHandler
 	JWTManager               *auth.JWTManager
 }
 
@@ -204,6 +205,29 @@ func RegisterV1(r *gin.Engine, deps Deps) {
 			registrarAccounts.GET("/:id", middleware.RequireAnyRole("viewer", "operator", "release_manager", "admin", "auditor"), deps.RegistrarHandler.GetAccount)
 			registrarAccounts.PUT("/:id", middleware.RequireAnyRole("admin"), deps.RegistrarHandler.UpdateAccount)
 			registrarAccounts.DELETE("/:id", middleware.RequireAnyRole("admin"), deps.RegistrarHandler.DeleteAccount)
+		}
+
+		// ── CDN Providers + Accounts (PE.1) ──────────────────────────
+		cdnProviders := authed.Group("/cdn-providers")
+		{
+			viewRoles := middleware.RequireAnyRole("viewer", "operator", "release_manager", "admin", "auditor")
+			cdnProviders.GET("", viewRoles, deps.CDNHandler.ListProviders)
+			cdnProviders.POST("", middleware.RequireAnyRole("admin"), deps.CDNHandler.CreateProvider)
+			cdnProviders.GET("/:id", viewRoles, deps.CDNHandler.GetProvider)
+			cdnProviders.PUT("/:id", middleware.RequireAnyRole("admin"), deps.CDNHandler.UpdateProvider)
+			cdnProviders.DELETE("/:id", middleware.RequireAnyRole("admin"), deps.CDNHandler.DeleteProvider)
+			// Accounts nested under provider
+			cdnProviders.GET("/:id/accounts", viewRoles, deps.CDNHandler.ListAccounts)
+			cdnProviders.POST("/:id/accounts", middleware.RequireAnyRole("admin"), deps.CDNHandler.CreateAccount)
+		}
+		// CDN Accounts (individual CRUD) — allows GET/PUT/DELETE by account id
+		cdnAccounts := authed.Group("/cdn-accounts")
+		{
+			viewRoles := middleware.RequireAnyRole("viewer", "operator", "release_manager", "admin", "auditor")
+			cdnAccounts.GET("", viewRoles, deps.CDNHandler.ListAllAccounts)
+			cdnAccounts.GET("/:id", viewRoles, deps.CDNHandler.GetAccount)
+			cdnAccounts.PUT("/:id", middleware.RequireAnyRole("admin"), deps.CDNHandler.UpdateAccount)
+			cdnAccounts.DELETE("/:id", middleware.RequireAnyRole("admin"), deps.CDNHandler.DeleteAccount)
 		}
 
 		// ── SSL Certificates ──────────────────────────────────────────
@@ -405,6 +429,19 @@ func RegisterV1(r *gin.Engine, deps Deps) {
 				gfwBogons.POST("", middleware.RequireAnyRole("admin"), deps.ProbeNodeHandler.AddBogonIP)
 				gfwBogons.DELETE("/:ip", middleware.RequireAnyRole("admin"), deps.ProbeNodeHandler.DeleteBogonIP)
 			}
+			// Verdict / blocking analysis (PD.3)
+			gfwVerdicts := gfw.Group("/verdicts")
+			{
+				viewRoles := middleware.RequireAnyRole("viewer", "operator", "release_manager", "admin", "auditor")
+				gfwVerdicts.GET("/blocked", viewRoles, deps.ProbeNodeHandler.ActivelyBlockedDomains)
+				gfwVerdicts.GET("/:domainId", viewRoles, deps.ProbeNodeHandler.ListVerdicts)
+				gfwVerdicts.GET("/:domainId/latest", viewRoles, deps.ProbeNodeHandler.LatestVerdict)
+			}
+			// Dashboard summary endpoints (PD.4)
+			viewRoles := middleware.RequireAnyRole("viewer", "operator", "release_manager", "admin", "auditor")
+			gfw.GET("/blocked-domains", viewRoles, deps.ProbeNodeHandler.ListBlockedDomains)
+			gfw.GET("/stats", viewRoles, deps.ProbeNodeHandler.GetGFWStats)
+			gfw.GET("/timeline/:domainId", viewRoles, deps.ProbeNodeHandler.GetDomainBlockingTimeline)
 		}
 	}
 }

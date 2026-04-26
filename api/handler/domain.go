@@ -31,6 +31,8 @@ type RegisterDomainRequest struct {
 	FQDN               string   `json:"fqdn"                 binding:"required"`
 	DNSProviderID      *int64   `json:"dns_provider_id"`
 	RegistrarAccountID *int64   `json:"registrar_account_id"`
+	CDNAccountID       *int64   `json:"cdn_account_id"`
+	OriginIPs          []string `json:"origin_ips"`
 	RegistrationDate   *string  `json:"registration_date"` // RFC3339 date
 	ExpiryDate         *string  `json:"expiry_date"`
 	AutoRenew          bool     `json:"auto_renew"`
@@ -58,6 +60,8 @@ func (h *DomainHandler) Register(c *gin.Context) {
 		OwnerUserID:        &userID,
 		DNSProviderID:      req.DNSProviderID,
 		RegistrarAccountID: req.RegistrarAccountID,
+		CDNAccountID:       req.CDNAccountID,
+		OriginIPs:          req.OriginIPs,
 		AutoRenew:          req.AutoRenew,
 		AnnualCost:         req.AnnualCost,
 		Currency:           req.Currency,
@@ -102,6 +106,8 @@ func (h *DomainHandler) Register(c *gin.Context) {
 type UpdateDomainAssetRequest struct {
 	RegistrarAccountID *int64   `json:"registrar_account_id"`
 	DNSProviderID      *int64   `json:"dns_provider_id"`
+	CDNAccountID       *int64   `json:"cdn_account_id"`
+	OriginIPs          []string `json:"origin_ips"`
 	RegistrationDate   *string  `json:"registration_date"`
 	ExpiryDate         *string  `json:"expiry_date"`
 	AutoRenew          bool     `json:"auto_renew"`
@@ -140,6 +146,8 @@ func (h *DomainHandler) UpdateAsset(c *gin.Context) {
 		ID:                 id,
 		RegistrarAccountID: req.RegistrarAccountID,
 		DNSProviderID:      req.DNSProviderID,
+		CDNAccountID:       req.CDNAccountID,
+		OriginIPs:          req.OriginIPs,
 		AutoRenew:          req.AutoRenew,
 		TransferLock:       req.TransferLock,
 		Hold:               req.Hold,
@@ -309,6 +317,11 @@ func (h *DomainHandler) List(c *gin.Context) {
 	if v := c.Query("dns_provider_id"); v != "" {
 		if id, err := strconv.ParseInt(v, 10, 64); err == nil {
 			in.DNSProviderID = &id
+		}
+	}
+	if v := c.Query("cdn_account_id"); v != "" {
+		if id, err := strconv.ParseInt(v, 10, 64); err == nil {
+			in.CDNAccountID = &id
 		}
 	}
 	if v := c.Query("tld"); v != "" {
@@ -579,6 +592,8 @@ func domainResponse(d *postgres.Domain) gin.H {
 		// Provider binding
 		"registrar_account_id": d.RegistrarAccountID,
 		"dns_provider_id":      d.DNSProviderID,
+		"cdn_account_id":       d.CDNAccountID,
+		"origin_ips":           d.OriginIPs,
 
 		// Registration & expiry
 		"registration_date": d.RegistrationDate,
