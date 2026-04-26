@@ -112,7 +112,7 @@ Phase A（DNS Provider 能力建設）
 ├── A.3  阿里雲 DNS (ALIDNS) Record CRUD   [depends: A.1]  ✅ (完成)
 ├── A.4  騰訊雲 DNSPod Record CRUD         [depends: A.1]  ✅ (完成)
 ├── A.5  華為雲 DNS Record CRUD            [depends: A.1]  ✅ (完成)
-└── A.6  DNS 記錄管理 UI                   [depends: A.1 + 至少一個 A.2-5]
+└── A.6  DNS 記錄管理 UI                   [depends: A.1 + 至少一個 A.2-5]  ✅ (完成)
 
 Phase B（域名與 DNS 整合）        [depends: A 完成]
 ├── B.1  域名與 DNS 供應商帳號綁定
@@ -434,7 +434,7 @@ type TencentDNSRequest struct {
 
 ---
 
-### A.6 DNS 記錄管理 UI
+### A.6 DNS 記錄管理 UI ✅ (完成)
 
 **位置**: 域名詳情頁（`DomainDetail.vue`）新增「DNS 記錄」Tab + DNS 供應商詳情頁（`DNSProviderDetail.vue`）新增「管理域名記錄」入口。
 
