@@ -45,6 +45,7 @@ const navGroups: NavGroup[] = [
       { label: '告警記錄',        key: '/alerts',       icon: 'bell'     },
       { label: 'Agent 管理',      key: '/agents',       icon: 'server'   },
       { label: 'Host Group 管理', key: '/host-groups',  icon: 'layers'   },
+      { label: '可用性儀表板',    key: '/uptime',       icon: 'chart'    },
     ],
   },
   {
@@ -64,6 +65,8 @@ const navGroups: NavGroup[] = [
       { label: '通知頻道',     key: '/settings/notification-channels',     icon: 'bell'     },
       { label: '通知規則',     key: '/settings/notification-rules',        icon: 'bell'     },
       { label: '通知歷史',     key: '/settings/notification-history',      icon: 'bell'     },
+      { label: '維護視窗',     key: '/maintenance',                        icon: 'clock'    },
+      { label: '狀態頁管理',   key: '/status-pages',                       icon: 'globe'    },
     ],
   },
 ]
@@ -104,6 +107,7 @@ function getIconSvg(name: string): string {
     layers:    `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/></svg>`,
     upload:    `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 16 12 12 8 16"/><line x1="12" y1="12" x2="12" y2="21"/><path d="M20.39 18.39A5 5 0 0 0 18 9h-1.26A8 8 0 1 0 3 16.3"/></svg>`,
     list:      `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg>`,
+    chart:     `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/><line x1="2" y1="20" x2="22" y2="20"/></svg>`,
   }
   return icons[name] ?? icons['folder']
 }

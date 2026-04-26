@@ -216,7 +216,45 @@ const router = createRouter({
           component: () => import('@/views/settings/NotificationHistory.vue'),
           meta: { title: '通知歷史', minRole: 'viewer' },
         },
+
+        // ── Maintenance Windows (PC.4) ─────────────────────────────
+        {
+          path: 'maintenance',
+          name: 'MaintenanceList',
+          component: () => import('@/views/maintenance/MaintenanceList.vue'),
+          meta: { title: '維護視窗管理', minRole: 'viewer' },
+        },
+
+        // ── Status Pages (PC.3) ────────────────────────────────────
+        {
+          path: 'status-pages',
+          name: 'StatusPageList',
+          component: () => import('@/views/status-pages/StatusPageList.vue'),
+          meta: { title: '狀態頁管理', minRole: 'viewer' },
+        },
+        {
+          path: 'status-pages/:id',
+          name: 'StatusPageEditor',
+          component: () => import('@/views/status-pages/StatusPageEditor.vue'),
+          meta: { title: '狀態頁編輯', minRole: 'viewer' },
+        },
+
+        // ── Uptime Dashboard (PC.5) ────────────────────────────────
+        {
+          path: 'uptime',
+          name: 'UptimeDashboard',
+          component: () => import('@/views/uptime/UptimeDashboard.vue'),
+          meta: { title: '可用性儀表板', minRole: 'viewer' },
+        },
       ],
+    },
+
+    // ── Public status page (no auth, minimal layout) ──────────
+    {
+      path: '/status/:slug',
+      name: 'StatusPagePublic',
+      component: () => import('@/views/public/StatusPagePublic.vue'),
+      meta: { requiresAuth: false },
     },
 
     // 404

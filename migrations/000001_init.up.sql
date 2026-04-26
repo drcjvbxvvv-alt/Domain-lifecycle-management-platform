@@ -897,6 +897,183 @@ CREATE TABLE gfw_check_assignments (
 CREATE INDEX idx_gfw_check_assignments_enabled ON gfw_check_assignments(enabled);
 
 -- ============================================================
+-- MAINTENANCE WINDOWS                                        [PC.4]
+-- ============================================================
+-- Planned downtime windows. While a domain is in maintenance:
+--   • probe records status="maintenance" (not "down")
+--   • alert engine suppresses alerts
+--   • status page shows "Under Maintenance"
+CREATE TABLE maintenance_windows (
+    id              BIGSERIAL PRIMARY KEY,
+    uuid            UUID NOT NULL DEFAULT gen_random_uuid(),
+    title           VARCHAR(150) NOT NULL,
+    description     TEXT,
+    -- "single" = one-time, "recurring_weekly" = every week on given weekdays,
+    -- "recurring_monthly" = every month on given day, "cron" = cron expression
+    strategy        VARCHAR(32) NOT NULL DEFAULT 'single',
+    start_at        TIMESTAMPTZ,                -- for single: exact start
+    end_at          TIMESTAMPTZ,                -- for single: exact end
+    -- for recurring: {"weekdays":[1,5],"start_time":"02:00","duration_minutes":120,"timezone":"UTC"}
+    -- for cron:      {"expression":"0 2 * * 1","duration_minutes":120,"timezone":"UTC"}
+    recurrence      JSONB,
+    active          BOOLEAN NOT NULL DEFAULT true,
+    created_by      BIGINT REFERENCES users(id),
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT chk_maintenance_strategy CHECK (
+        strategy IN ('single', 'recurring_weekly', 'recurring_monthly', 'cron')
+    )
+);
+
+CREATE INDEX idx_maintenance_windows_active    ON maintenance_windows(active);
+CREATE INDEX idx_maintenance_windows_start_end ON maintenance_windows(start_at, end_at)
+    WHERE strategy = 'single';
+
+-- Targets: which domains/host_groups/projects are covered by this window.
+-- A domain is in maintenance if it is directly targeted OR its host_group
+-- or project is targeted.
+CREATE TABLE maintenance_window_targets (
+    id              BIGSERIAL PRIMARY KEY,
+    maintenance_id  BIGINT NOT NULL REFERENCES maintenance_windows(id) ON DELETE CASCADE,
+    target_type     VARCHAR(32) NOT NULL,   -- "domain", "host_group", "project"
+    target_id       BIGINT NOT NULL,
+    CONSTRAINT uq_maintenance_target UNIQUE (maintenance_id, target_type, target_id),
+    CONSTRAINT chk_maintenance_target_type CHECK (
+        target_type IN ('domain', 'host_group', 'project')
+    )
+);
+
+CREATE INDEX idx_maintenance_targets_type_id ON maintenance_window_targets(target_type, target_id);
+
+-- ============================================================
+-- STATUS PAGES                                               [PC.3]
+-- ============================================================
+CREATE TABLE status_pages (
+    id                   BIGSERIAL PRIMARY KEY,
+    uuid                 UUID NOT NULL DEFAULT gen_random_uuid(),
+    slug                 VARCHAR(128) NOT NULL,
+    title                VARCHAR(255) NOT NULL,
+    description          TEXT,
+    published            BOOLEAN NOT NULL DEFAULT true,
+    password_hash        VARCHAR(255),          -- bcrypt; NULL = public
+    custom_domain        VARCHAR(255),
+    theme                VARCHAR(32) DEFAULT 'default',
+    logo_url             VARCHAR(512),
+    footer_text          TEXT,
+    custom_css           TEXT,
+    auto_refresh_seconds INT NOT NULL DEFAULT 60,
+    created_by           BIGINT REFERENCES users(id),
+    created_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT uq_status_pages_slug UNIQUE (slug)
+);
+
+CREATE TABLE status_page_groups (
+    id             BIGSERIAL PRIMARY KEY,
+    status_page_id BIGINT NOT NULL REFERENCES status_pages(id) ON DELETE CASCADE,
+    name           VARCHAR(128) NOT NULL,
+    sort_order     INT NOT NULL DEFAULT 0
+);
+
+CREATE INDEX idx_status_page_groups_page ON status_page_groups(status_page_id);
+
+CREATE TABLE status_page_monitors (
+    id           BIGSERIAL PRIMARY KEY,
+    group_id     BIGINT NOT NULL REFERENCES status_page_groups(id) ON DELETE CASCADE,
+    domain_id    BIGINT NOT NULL REFERENCES domains(id),
+    display_name VARCHAR(128),    -- hides real FQDN if set
+    sort_order   INT NOT NULL DEFAULT 0,
+    CONSTRAINT uq_status_page_monitor UNIQUE (group_id, domain_id)
+);
+
+CREATE INDEX idx_status_page_monitors_group  ON status_page_monitors(group_id);
+CREATE INDEX idx_status_page_monitors_domain ON status_page_monitors(domain_id);
+
+CREATE TABLE status_page_incidents (
+    id             BIGSERIAL PRIMARY KEY,
+    status_page_id BIGINT NOT NULL REFERENCES status_pages(id) ON DELETE CASCADE,
+    title          VARCHAR(255) NOT NULL,
+    content        TEXT,              -- Markdown body
+    severity       VARCHAR(32) NOT NULL DEFAULT 'info',  -- info, warning, danger
+    pinned         BOOLEAN NOT NULL DEFAULT false,
+    active         BOOLEAN NOT NULL DEFAULT true,
+    created_by     BIGINT REFERENCES users(id),
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT chk_incident_severity CHECK (severity IN ('info', 'warning', 'danger'))
+);
+
+CREATE INDEX idx_status_page_incidents_page   ON status_page_incidents(status_page_id);
+CREATE INDEX idx_status_page_incidents_active ON status_page_incidents(status_page_id, active);
+
+-- ============================================================
+-- UPTIME ANALYTICS (PC.5)                                   [PC.5]
+-- ============================================================
+-- TimescaleDB continuous aggregates over probe_results.
+-- Refresh policies are set here; the hypertable is created in
+-- the TimescaleDB migration (000002_timescale.up.sql).
+-- These views are created conditionally so plain PostgreSQL
+-- (without TimescaleDB) does not error at migration time.
+
+-- Hourly rollup: up/down/maintenance counts + response time stats.
+-- Requires TimescaleDB to be installed; skipped otherwise.
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM pg_extension WHERE extname = 'timescaledb'
+  ) THEN
+    EXECUTE $sql$
+      CREATE MATERIALIZED VIEW IF NOT EXISTS probe_stats_hourly
+      WITH (timescaledb.continuous) AS
+      SELECT
+          domain_id,
+          probe_type,
+          time_bucket('1 hour', measured_at)         AS bucket,
+          COUNT(*) FILTER (WHERE status = 'up')       AS up_count,
+          COUNT(*) FILTER (WHERE status = 'down')     AS down_count,
+          COUNT(*) FILTER (WHERE status = 'maintenance') AS maintenance_count,
+          AVG(response_time_ms)                        AS avg_response_ms,
+          MIN(response_time_ms)                        AS min_response_ms,
+          MAX(response_time_ms)                        AS max_response_ms,
+          PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY response_time_ms) AS p95_response_ms
+      FROM probe_results
+      GROUP BY domain_id, probe_type, bucket
+      WITH NO DATA
+    $sql$;
+
+    EXECUTE $sql$
+      CREATE MATERIALIZED VIEW IF NOT EXISTS probe_stats_daily
+      WITH (timescaledb.continuous) AS
+      SELECT
+          domain_id,
+          probe_type,
+          time_bucket('1 day', bucket)               AS bucket,
+          SUM(up_count)                               AS up_count,
+          SUM(down_count)                             AS down_count,
+          SUM(maintenance_count)                      AS maintenance_count,
+          AVG(avg_response_ms)                        AS avg_response_ms,
+          MIN(min_response_ms)                        AS min_response_ms,
+          MAX(max_response_ms)                        AS max_response_ms
+      FROM probe_stats_hourly
+      GROUP BY domain_id, probe_type, bucket
+      WITH NO DATA
+    $sql$;
+
+    -- Refresh policies
+    PERFORM add_continuous_aggregate_policy('probe_stats_hourly',
+      start_offset => INTERVAL '2 hours',
+      end_offset   => INTERVAL '1 hour',
+      schedule_interval => INTERVAL '1 hour');
+
+    PERFORM add_continuous_aggregate_policy('probe_stats_daily',
+      start_offset => INTERVAL '2 days',
+      end_offset   => INTERVAL '1 day',
+      schedule_interval => INTERVAL '1 day');
+  END IF;
+END
+$$;
+
+-- ============================================================
 -- SEED DATA                                                  [P1]
 -- ============================================================
 -- Five roles per ADR-0003 D7

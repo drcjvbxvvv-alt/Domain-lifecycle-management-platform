@@ -21,6 +21,7 @@ import (
 	alertsvc "domain-platform/internal/alert"
 	"domain-platform/internal/auth"
 	gfwsvc "domain-platform/internal/gfw"
+	probesvc "domain-platform/internal/probe"
 	"domain-platform/internal/bootstrap"
 	costsvc "domain-platform/internal/cost"
 	domainsvc "domain-platform/internal/domain"
@@ -30,6 +31,8 @@ import (
 	dnsrecsvc "domain-platform/internal/dnsrecord"
 	importsvc "domain-platform/internal/importer"
 	"domain-platform/internal/lifecycle"
+	maintenancesvc "domain-platform/internal/maintenance"
+	statuspagesvc "domain-platform/internal/statuspage"
 	"domain-platform/internal/project"
 	"domain-platform/internal/registrar"
 	"domain-platform/internal/release"
@@ -161,6 +164,17 @@ func main() {
 	alertHandler := handler.NewAlertHandler(alertStore, alertEngine, logger)
 	notifHandler := handler.NewNotificationHandler(notifStore, alertStore, dispatcher, logger)
 
+	maintenanceStore := postgres.NewMaintenanceStore(db)
+	maintenanceSvc := maintenancesvc.NewService(maintenanceStore, logger)
+	maintenanceHandler := handler.NewMaintenanceHandler(maintenanceSvc, logger)
+
+	statusPageStore := postgres.NewStatusPageStore(db)
+	statusPageSvc := statuspagesvc.NewService(statusPageStore, maintenanceSvc, logger)
+	statusPageHandler := handler.NewStatusPageHandler(statusPageSvc, logger)
+
+	analyticsService := probesvc.NewAnalyticsService(db, logger)
+	uptimeHandler := handler.NewUptimeHandler(analyticsService, logger)
+
 	gfwNodeStore := postgres.NewGFWNodeStore(db)
 	gfwNodeSvc := gfwsvc.NewNodeService(gfwNodeStore, domainStore, logger)
 	probeNodeHandler := handler.NewProbeNodeHandler(gfwNodeSvc, gfwNodeStore, logger)
@@ -190,6 +204,9 @@ func main() {
 		ProbeHandler:            probeHandler,
 		AlertHandler:            alertHandler,
 		NotificationHandler:     notifHandler,
+		MaintenanceHandler:      maintenanceHandler,
+		StatusPageHandler:       statusPageHandler,
+		UptimeHandler:           uptimeHandler,
 		ProbeNodeHandler:        probeNodeHandler,
 		JWTManager:              jwtMgr,
 	})

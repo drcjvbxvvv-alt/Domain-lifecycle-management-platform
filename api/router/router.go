@@ -34,6 +34,9 @@ type Deps struct {
 	AlertHandler             *handler.AlertHandler
 	NotificationHandler      *handler.NotificationHandler
 	ProbeNodeHandler         *handler.ProbeNodeHandler
+	MaintenanceHandler       *handler.MaintenanceHandler
+	StatusPageHandler        *handler.StatusPageHandler
+	UptimeHandler            *handler.UptimeHandler
 	JWTManager               *auth.JWTManager
 }
 
@@ -41,10 +44,19 @@ type Deps struct {
 func RegisterV1(r *gin.Engine, deps Deps) {
 	v1 := r.Group("/api/v1")
 
-	// ── Public routes (no auth) ────────────────���───────────────────────
+	// ── Public routes (no auth) ───────────────────────────────────────
 	authGroup := v1.Group("/auth")
 	{
 		authGroup.POST("/login", deps.AuthHandler.Login)
+	}
+
+	// ── Status Page public endpoints (no auth) ─────────────────────────
+	if deps.StatusPageHandler != nil {
+		statusPublic := v1.Group("/status")
+		{
+			statusPublic.GET("/:slug", deps.StatusPageHandler.GetPublicStatus)
+			statusPublic.POST("/:slug/auth", deps.StatusPageHandler.AuthPage)
+		}
 	}
 
 	// ── Authenticated routes ───────────────────────────────���───────────
@@ -315,6 +327,52 @@ func RegisterV1(r *gin.Engine, deps Deps) {
 		notifHistory := authed.Group("/notifications/history")
 		{
 			notifHistory.GET("", middleware.RequireAnyRole("viewer", "operator", "release_manager", "admin", "auditor"), deps.NotificationHandler.ListHistory)
+		}
+
+		// ── Maintenance Windows (PC.4) ────────────────────────────────────────
+		maintenance := authed.Group("/maintenance")
+		{
+			maintenance.GET("", middleware.RequireAnyRole("viewer", "operator", "release_manager", "admin", "auditor"), deps.MaintenanceHandler.List)
+			maintenance.POST("", middleware.RequireAnyRole("admin", "operator"), deps.MaintenanceHandler.Create)
+			maintenance.GET("/:id", middleware.RequireAnyRole("viewer", "operator", "release_manager", "admin", "auditor"), deps.MaintenanceHandler.Get)
+			maintenance.PUT("/:id", middleware.RequireAnyRole("admin", "operator"), deps.MaintenanceHandler.Update)
+			maintenance.DELETE("/:id", middleware.RequireAnyRole("admin"), deps.MaintenanceHandler.Delete)
+			maintenance.POST("/:id/targets", middleware.RequireAnyRole("admin", "operator"), deps.MaintenanceHandler.AddTarget)
+			maintenance.DELETE("/:id/targets/:tid", middleware.RequireAnyRole("admin", "operator"), deps.MaintenanceHandler.RemoveTarget)
+		}
+
+		// ── Status Pages (PC.3) — admin API ──────────────────────────────────
+		statusPages := authed.Group("/status-pages")
+		{
+			statusPages.GET("", middleware.RequireAnyRole("viewer", "operator", "release_manager", "admin", "auditor"), deps.StatusPageHandler.ListPages)
+			statusPages.POST("", middleware.RequireAnyRole("admin", "operator"), deps.StatusPageHandler.CreatePage)
+			statusPages.GET("/:id", middleware.RequireAnyRole("viewer", "operator", "release_manager", "admin", "auditor"), deps.StatusPageHandler.GetPage)
+			statusPages.PUT("/:id", middleware.RequireAnyRole("admin", "operator"), deps.StatusPageHandler.UpdatePage)
+			statusPages.DELETE("/:id", middleware.RequireAnyRole("admin"), deps.StatusPageHandler.DeletePage)
+			// Groups
+			statusPages.POST("/:id/groups", middleware.RequireAnyRole("admin", "operator"), deps.StatusPageHandler.CreateGroup)
+			statusPages.PUT("/:id/groups/:gid", middleware.RequireAnyRole("admin", "operator"), deps.StatusPageHandler.UpdateGroup)
+			statusPages.DELETE("/:id/groups/:gid", middleware.RequireAnyRole("admin"), deps.StatusPageHandler.DeleteGroup)
+			// Monitors (nested under groups)
+			statusPages.POST("/:id/groups/:gid/monitors", middleware.RequireAnyRole("admin", "operator"), deps.StatusPageHandler.AddMonitor)
+			statusPages.DELETE("/:id/groups/:gid/monitors/:mid", middleware.RequireAnyRole("admin"), deps.StatusPageHandler.RemoveMonitor)
+			// Incidents
+			statusPages.GET("/:id/incidents", middleware.RequireAnyRole("viewer", "operator", "release_manager", "admin", "auditor"), deps.StatusPageHandler.ListIncidents)
+			statusPages.POST("/:id/incidents", middleware.RequireAnyRole("admin", "operator"), deps.StatusPageHandler.CreateIncident)
+			statusPages.PUT("/:id/incidents/:iid", middleware.RequireAnyRole("admin", "operator"), deps.StatusPageHandler.UpdateIncident)
+			statusPages.DELETE("/:id/incidents/:iid", middleware.RequireAnyRole("admin"), deps.StatusPageHandler.DeleteIncident)
+		}
+
+		// ── Uptime Analytics (PC.5) ──────────────────────────────────────────
+		if deps.UptimeHandler != nil {
+			uptime := authed.Group("/uptime")
+			{
+				// Static path before /:domain_id
+				uptime.GET("/worst", middleware.RequireAnyRole("viewer", "operator", "release_manager", "admin", "auditor"), deps.UptimeHandler.GetWorstPerformers)
+				uptime.GET("/:domain_id", middleware.RequireAnyRole("viewer", "operator", "release_manager", "admin", "auditor"), deps.UptimeHandler.GetUptime)
+				uptime.GET("/:domain_id/response-time", middleware.RequireAnyRole("viewer", "operator", "release_manager", "admin", "auditor"), deps.UptimeHandler.GetResponseTimeSeries)
+				uptime.GET("/:domain_id/calendar", middleware.RequireAnyRole("viewer", "operator", "release_manager", "admin", "auditor"), deps.UptimeHandler.GetUptimeCalendar)
+			}
 		}
 
 		// ── GFW Probe Node Admin (PD.1) ───────────────────────────────────────

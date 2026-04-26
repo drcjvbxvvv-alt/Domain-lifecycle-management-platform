@@ -1,4 +1,4 @@
-# PHASE_C_TASKLIST.md — Monitoring & Alerting Work Order (PC.1 ✅ PC.2 ✅ PC.6 ✅)
+# PHASE_C_TASKLIST.md — Monitoring & Alerting Work Order (PC.1 ✅ PC.2 ✅ PC.3 ✅ PC.4 ✅ PC.5 ✅ PC.6 ✅)
 
 > **Created 2026-04-21.** This document is the authoritative work order for
 > Phase C (Monitoring & Alerting) of the platform restructuring.
@@ -390,10 +390,10 @@ and dispatches notifications through the configured channels.
 
 ---
 
-### PC.3 — Public Status Page
+### PC.3 — Public Status Page ✅ (完成)
 
 **Owner**: Sonnet
-**Status**: 🔲 NOT STARTED
+**Status**: ✅ COMPLETED 2026-04-26
 **Depends on**: PC.1 (probe data for uptime bars), PC.2 (alert status for
 current state display)
 **Reads first**: `docs/analysis/UPTIME_KUMA_ANALYSIS.md` §4 "Status Page Model"
@@ -525,10 +525,10 @@ history; incidents communicate ongoing issues.
 
 ---
 
-### PC.4 — Maintenance Windows
+### PC.4 — Maintenance Windows ✅ (完成)
 
 **Owner**: Sonnet
-**Status**: 🔲 NOT STARTED
+**Status**: ✅ COMPLETED 2026-04-26
 **Depends on**: PC.2 (alert engine — maintenance suppresses alerts)
 **Reads first**: `docs/analysis/UPTIME_KUMA_ANALYSIS.md` §7 "Maintenance Model"
 
@@ -632,10 +632,10 @@ suppress alerts and show correct status on public pages.
 
 ---
 
-### PC.5 — Uptime Dashboard
+### PC.5 — Uptime Dashboard ✅ (完成)
 
 **Owner**: Sonnet
-**Status**: 🔲 NOT STARTED
+**Status**: ✅ COMPLETED 2026-04-26
 **Depends on**: PC.1 (probe data must be accumulating)
 **Reads first**: `docs/analysis/UPTIME_KUMA_ANALYSIS.md` §6 "Uptime Calculation"
 
